@@ -503,7 +503,7 @@ void GameServer::refine_spawn() {
     int best_distance = std::numeric_limits<int>::max();
     int best_slope = std::numeric_limits<int>::max();
 
-    constexpr int kSpawnSlopeRadius = 4;
+    constexpr int kSpawnSlopeRadius = 8;
     for (int lz = kSpawnSlopeRadius; lz < kChunkSizeZ - kSpawnSlopeRadius; ++lz) {
         for (int lx = kSpawnSlopeRadius; lx < kChunkSizeX - kSpawnSlopeRadius; ++lx) {
             const int height = chunk->highest_solid(lx, lz);

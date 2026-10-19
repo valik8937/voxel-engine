@@ -27,6 +27,8 @@ Working:
 - First-person player with gravity, jumping, collision and client-side
   prediction/reconciliation.
 - Block breaking/placing with server-side reach validation.
+- Remote player boxes from server snapshots and a HUD crosshair.
+- Safe spawn search over flat, open terrain.
 - Jolt physics wrapper (static triangle meshes, dynamic boxes) and unit test.
 - miniaudio client audio and a click sound.
 - Headless integration tests and a chunk generation benchmark.
@@ -35,10 +37,9 @@ Next:
 
 - greedy meshing and chunk LOD;
 - Jolt collision streaming for chunks around players;
-- remote player rendering;
 - trees and surface features;
 - region-file persistence and client chunk cache;
-- greedy meshing, shadows, water pass and better UI.
+- shadows, transparent water pass and better UI.
 
 ## Build
 

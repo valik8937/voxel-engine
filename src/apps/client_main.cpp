@@ -20,6 +20,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -264,6 +265,8 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
     std::uint64_t frame_count = 0;
     const double welcome_deadline = last_time + options.timeout_seconds;
     std::size_t expected_chunks = 0;
+    std::vector<vox::PlayerRenderInfo> remote_players;
+    remote_players.reserve(16);
 
     while (running) {
         const double now = now_seconds();
@@ -282,6 +285,21 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
             }
         }
         client.poll(0);
+
+        remote_players.clear();
+        if (client.welcome() && client.last_snapshot()) {
+            for (const vox::net::PlayerState& state : client.last_snapshot()->players) {
+                if (state.player_id == client.player_id()) {
+                    continue;
+                }
+                remote_players.push_back(vox::PlayerRenderInfo{
+                    state.player_id,
+                    vox::Vec3{state.x, state.y, state.z},
+                    state.yaw,
+                });
+            }
+        }
+        renderer.update_players(remote_players);
 
         if (client.welcome() && !chunks_requested) {
             const auto welcome = *client.welcome();

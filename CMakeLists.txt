@@ -123,6 +123,8 @@ set(VOX_SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/chunk.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/sky.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/sky.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/hud.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/hud.frag
 )
 set(VOX_SHADER_OUTPUTS)
 foreach(shader ${VOX_SHADER_SOURCES})

@@ -40,6 +40,63 @@ SDL_GPUTextureFormat choose_depth_format(SDL_GPUDevice* device) {
     return SDL_GPU_TEXTUREFORMAT_INVALID;
 }
 
+Color shade(Color color, float light) {
+    return Color{
+        static_cast<std::uint8_t>(std::clamp(static_cast<float>(color.r) * light, 0.0f, 255.0f)),
+        static_cast<std::uint8_t>(std::clamp(static_cast<float>(color.g) * light, 0.0f, 255.0f)),
+        static_cast<std::uint8_t>(std::clamp(static_cast<float>(color.b) * light, 0.0f, 255.0f)),
+        255,
+    };
+}
+
+void append_box(ChunkMesh& mesh, Vec3 min, Vec3 max, Color top, Color side, Color bottom) {
+    struct Face {
+        int normal[3];
+        int base[3];
+        int u[3];
+        int v[3];
+        float light;
+        Color color;
+    };
+
+    const Face faces[6] = {
+        {{1, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, 0.72f, side},
+        {{-1, 0, 0}, {0, 0, 0}, {0, 0, 1}, {0, 1, 0}, 0.72f, side},
+        {{0, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 0}, 1.00f, top},
+        {{0, -1, 0}, {0, 0, 0}, {1, 0, 0}, {0, 0, 1}, 0.50f, bottom},
+        {{0, 0, 1}, {0, 0, 1}, {1, 0, 0}, {0, 1, 0}, 0.82f, side},
+        {{0, 0, -1}, {0, 0, 0}, {0, 1, 0}, {1, 0, 0}, 0.82f, side},
+    };
+
+    const Vec3 size = max - min;
+    for (const Face& face : faces) {
+        const Color color = shade(face.color, face.light);
+        const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
+        const int corners[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+        for (const auto& corner : corners) {
+            const float x = min.x + size.x * static_cast<float>(face.base[0] +
+                                                               face.u[0] * corner[0] +
+                                                               face.v[0] * corner[1]);
+            const float y = min.y + size.y * static_cast<float>(face.base[1] +
+                                                               face.u[1] * corner[0] +
+                                                               face.v[1] * corner[1]);
+            const float z = min.z + size.z * static_cast<float>(face.base[2] +
+                                                               face.u[2] * corner[0] +
+                                                               face.v[2] * corner[1]);
+            mesh.vertices.push_back(MeshVertex{
+                x, y, z, color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, 1.0f,
+            });
+        }
+        mesh.indices.push_back(base + 0);
+        mesh.indices.push_back(base + 1);
+        mesh.indices.push_back(base + 2);
+        mesh.indices.push_back(base + 0);
+        mesh.indices.push_back(base + 2);
+        mesh.indices.push_back(base + 3);
+        (void)face.normal;
+    }
+}
+
 } // namespace
 
 Renderer::~Renderer() {
@@ -119,6 +176,10 @@ void Renderer::shutdown() {
             SDL_ReleaseGPUGraphicsPipeline(device_, sky_pipeline_);
             sky_pipeline_ = nullptr;
         }
+        if (hud_pipeline_ != nullptr) {
+            SDL_ReleaseGPUGraphicsPipeline(device_, hud_pipeline_);
+            hud_pipeline_ = nullptr;
+        }
         if (depth_texture_ != nullptr) {
             SDL_ReleaseGPUTexture(device_, depth_texture_);
             depth_texture_ = nullptr;
@@ -187,12 +248,17 @@ bool Renderer::create_pipelines() {
     SDL_GPUShader* chunk_fs = load_shader("chunk.frag.spv", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
     SDL_GPUShader* sky_vs = load_shader("sky.vert.spv", SDL_GPU_SHADERSTAGE_VERTEX, 0);
     SDL_GPUShader* sky_fs = load_shader("sky.frag.spv", SDL_GPU_SHADERSTAGE_FRAGMENT, 0);
+    SDL_GPUShader* hud_vs = load_shader("hud.vert.spv", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader* hud_fs = load_shader("hud.frag.spv", SDL_GPU_SHADERSTAGE_FRAGMENT, 0);
 
-    if (chunk_vs == nullptr || chunk_fs == nullptr || sky_vs == nullptr || sky_fs == nullptr) {
+    if (chunk_vs == nullptr || chunk_fs == nullptr || sky_vs == nullptr ||
+        sky_fs == nullptr || hud_vs == nullptr || hud_fs == nullptr) {
         if (chunk_vs) SDL_ReleaseGPUShader(device_, chunk_vs);
         if (chunk_fs) SDL_ReleaseGPUShader(device_, chunk_fs);
         if (sky_vs) SDL_ReleaseGPUShader(device_, sky_vs);
         if (sky_fs) SDL_ReleaseGPUShader(device_, sky_fs);
+        if (hud_vs) SDL_ReleaseGPUShader(device_, hud_vs);
+        if (hud_fs) SDL_ReleaseGPUShader(device_, hud_fs);
         return false;
     }
 
@@ -262,12 +328,20 @@ bool Renderer::create_pipelines() {
 
     sky_pipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &sky_pipeline_info);
 
+    SDL_GPUGraphicsPipelineCreateInfo hud_pipeline_info = sky_pipeline_info;
+    hud_pipeline_info.vertex_shader = hud_vs;
+    hud_pipeline_info.fragment_shader = hud_fs;
+    hud_pipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &hud_pipeline_info);
+
     SDL_ReleaseGPUShader(device_, chunk_vs);
     SDL_ReleaseGPUShader(device_, chunk_fs);
     SDL_ReleaseGPUShader(device_, sky_vs);
     SDL_ReleaseGPUShader(device_, sky_fs);
+    SDL_ReleaseGPUShader(device_, hud_vs);
+    SDL_ReleaseGPUShader(device_, hud_fs);
 
-    if (chunk_pipeline_ == nullptr || sky_pipeline_ == nullptr) {
+    if (chunk_pipeline_ == nullptr || sky_pipeline_ == nullptr ||
+        hud_pipeline_ == nullptr) {
         VOX_LOG_ERROR("Pipeline creation failed: {}", SDL_GetError());
         return false;
     }
@@ -320,6 +394,51 @@ void Renderer::update_world(const World& world) {
         gpu_mesh.initialized = true;
         ++rebuilds;
     }
+}
+
+void Renderer::update_players(std::span<const PlayerRenderInfo> players) {
+    if (device_ == nullptr) {
+        return;
+    }
+    if (players.size() == last_players_.size() &&
+        std::equal(players.begin(), players.end(), last_players_.begin())) {
+        return;
+    }
+    last_players_.assign(players.begin(), players.end());
+
+    ChunkMesh mesh;
+    mesh.bounds.min = Vec3{std::numeric_limits<float>::max(),
+                           std::numeric_limits<float>::max(),
+                           std::numeric_limits<float>::max()};
+    mesh.bounds.max = Vec3{-std::numeric_limits<float>::max(),
+                           -std::numeric_limits<float>::max(),
+                           -std::numeric_limits<float>::max()};
+
+    const Color body_top{86, 126, 210, 255};
+    const Color body_side{62, 96, 166, 255};
+    const Color body_bottom{40, 62, 110, 255};
+    const Color head_top{224, 184, 150, 255};
+    const Color head_side{196, 154, 122, 255};
+    const Color head_bottom{160, 124, 100, 255};
+
+    for (const PlayerRenderInfo& player : players) {
+        const Vec3 feet = player.feet;
+        const Vec3 body_min{feet.x - 0.3f, feet.y, feet.z - 0.3f};
+        const Vec3 body_max{feet.x + 0.3f, feet.y + 1.5f, feet.z + 0.3f};
+        const Vec3 head_min{feet.x - 0.24f, feet.y + 1.5f, feet.z - 0.24f};
+        const Vec3 head_max{feet.x + 0.24f, feet.y + 1.8f, feet.z + 0.24f};
+
+        append_box(mesh, body_min, body_max, body_top, body_side, body_bottom);
+        append_box(mesh, head_min, head_max, head_top, head_side, head_bottom);
+        mesh.bounds.min.x = std::min(mesh.bounds.min.x, body_min.x);
+        mesh.bounds.min.y = std::min(mesh.bounds.min.y, body_min.y);
+        mesh.bounds.min.z = std::min(mesh.bounds.min.z, body_min.z);
+        mesh.bounds.max.x = std::max(mesh.bounds.max.x, body_max.x);
+        mesh.bounds.max.y = std::max(mesh.bounds.max.y, head_max.y);
+        mesh.bounds.max.z = std::max(mesh.bounds.max.z, body_max.z);
+    }
+
+    upload_player_mesh(mesh);
 }
 
 void Renderer::rebuild_mesh(const World& world, ChunkCoord coord, GpuMesh& gpu_mesh) {
@@ -432,6 +551,104 @@ void Renderer::upload_mesh(GpuMesh& gpu_mesh, const ChunkMesh& mesh) {
     gpu_mesh.index_count = static_cast<std::uint32_t>(mesh.indices.size());
 }
 
+void Renderer::upload_player_mesh(const ChunkMesh& mesh) {
+    if (mesh.empty()) {
+        player_mesh_.index_count = 0;
+        return;
+    }
+
+    const std::size_t vertex_bytes = mesh.vertices.size() * sizeof(MeshVertex);
+    const std::size_t index_bytes = mesh.indices.size() * sizeof(std::uint32_t);
+    if (vertex_bytes > std::numeric_limits<Uint32>::max() ||
+        index_bytes > std::numeric_limits<Uint32>::max()) {
+        return;
+    }
+
+    const auto round_up = [](std::uint32_t value) {
+        constexpr std::uint32_t alignment = 4096;
+        return (value + alignment - 1) & ~(alignment - 1);
+    };
+    const std::uint32_t vertex_size = round_up(static_cast<std::uint32_t>(vertex_bytes));
+    const std::uint32_t index_size = round_up(static_cast<std::uint32_t>(index_bytes));
+
+    if (player_mesh_.vertex_buffer == nullptr || player_vertex_capacity_ < vertex_size) {
+        SDL_WaitForGPUIdle(device_);
+        if (player_mesh_.vertex_buffer != nullptr) {
+            SDL_ReleaseGPUBuffer(device_, player_mesh_.vertex_buffer);
+            player_mesh_.vertex_buffer = nullptr;
+        }
+        SDL_GPUBufferCreateInfo info{};
+        info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+        info.size = vertex_size;
+        player_mesh_.vertex_buffer = SDL_CreateGPUBuffer(device_, &info);
+        player_vertex_capacity_ = vertex_size;
+    }
+    if (player_mesh_.index_buffer == nullptr || player_index_capacity_ < index_size) {
+        SDL_WaitForGPUIdle(device_);
+        if (player_mesh_.index_buffer != nullptr) {
+            SDL_ReleaseGPUBuffer(device_, player_mesh_.index_buffer);
+            player_mesh_.index_buffer = nullptr;
+        }
+        SDL_GPUBufferCreateInfo info{};
+        info.usage = SDL_GPU_BUFFERUSAGE_INDEX;
+        info.size = index_size;
+        player_mesh_.index_buffer = SDL_CreateGPUBuffer(device_, &info);
+        player_index_capacity_ = index_size;
+    }
+    if (player_mesh_.vertex_buffer == nullptr || player_mesh_.index_buffer == nullptr) {
+        VOX_LOG_ERROR("Cannot create player GPU buffers: {}", SDL_GetError());
+        return;
+    }
+
+    SDL_GPUTransferBufferCreateInfo transfer_info{};
+    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    transfer_info.size = static_cast<Uint32>(vertex_bytes + index_bytes);
+    SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(device_, &transfer_info);
+    if (transfer == nullptr) {
+        return;
+    }
+    void* mapped = SDL_MapGPUTransferBuffer(device_, transfer, false);
+    if (mapped == nullptr) {
+        SDL_ReleaseGPUTransferBuffer(device_, transfer);
+        return;
+    }
+    std::memcpy(mapped, mesh.vertices.data(), vertex_bytes);
+    std::memcpy(static_cast<std::uint8_t*>(mapped) + vertex_bytes, mesh.indices.data(),
+                index_bytes);
+    SDL_UnmapGPUTransferBuffer(device_, transfer);
+
+    SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device_);
+    if (command == nullptr) {
+        SDL_ReleaseGPUTransferBuffer(device_, transfer);
+        return;
+    }
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(command);
+    SDL_GPUTransferBufferLocation source{};
+    source.transfer_buffer = transfer;
+    source.offset = 0;
+
+    SDL_GPUBufferRegion vertex_region{};
+    vertex_region.buffer = player_mesh_.vertex_buffer;
+    vertex_region.offset = 0;
+    vertex_region.size = static_cast<Uint32>(vertex_bytes);
+    SDL_UploadToGPUBuffer(copy, &source, &vertex_region, true);
+
+    source.offset = static_cast<Uint32>(vertex_bytes);
+    SDL_GPUBufferRegion index_region{};
+    index_region.buffer = player_mesh_.index_buffer;
+    index_region.offset = 0;
+    index_region.size = static_cast<Uint32>(index_bytes);
+    SDL_UploadToGPUBuffer(copy, &source, &index_region, true);
+
+    SDL_EndGPUCopyPass(copy);
+    if (!SDL_SubmitGPUCommandBuffer(command)) {
+        VOX_LOG_ERROR("Cannot submit player upload: {}", SDL_GetError());
+    }
+    SDL_ReleaseGPUTransferBuffer(device_, transfer);
+    player_mesh_.index_count = static_cast<std::uint32_t>(mesh.indices.size());
+    player_mesh_.initialized = true;
+}
+
 void Renderer::release_mesh(GpuMesh& gpu_mesh) {
     if (gpu_mesh.vertex_buffer != nullptr) {
         SDL_ReleaseGPUBuffer(device_, gpu_mesh.vertex_buffer);
@@ -451,6 +668,10 @@ void Renderer::release_all_meshes() {
         release_mesh(mesh);
     }
     meshes_.clear();
+    release_mesh(player_mesh_);
+    player_vertex_capacity_ = 0;
+    player_index_capacity_ = 0;
+    last_players_.clear();
 }
 
 bool Renderer::begin_frame() {
@@ -551,11 +772,10 @@ void Renderer::render(const Camera& camera) {
 
     if (chunk_pipeline_ != nullptr) {
         SDL_BindGPUGraphicsPipeline(pass, chunk_pipeline_);
-        for (const auto& [coord, mesh] : meshes_) {
-            (void)coord;
+        const auto draw_mesh = [&](const GpuMesh& mesh) {
             if (mesh.index_count == 0 || mesh.vertex_buffer == nullptr ||
                 mesh.index_buffer == nullptr) {
-                continue;
+                return;
             }
             SDL_GPUBufferBinding vertex_binding{};
             vertex_binding.buffer = mesh.vertex_buffer;
@@ -568,7 +788,18 @@ void Renderer::render(const Camera& camera) {
             SDL_BindGPUIndexBuffer(pass, &index_binding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
 
             SDL_DrawGPUIndexedPrimitives(pass, mesh.index_count, 1, 0, 0, 0);
+        };
+
+        for (const auto& [coord, mesh] : meshes_) {
+            (void)coord;
+            draw_mesh(mesh);
         }
+        draw_mesh(player_mesh_);
+    }
+
+    if (hud_pipeline_ != nullptr) {
+        SDL_BindGPUGraphicsPipeline(pass, hud_pipeline_);
+        SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
     }
 
     SDL_EndGPURenderPass(pass);

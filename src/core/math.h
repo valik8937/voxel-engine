@@ -38,6 +38,7 @@ struct Vec3 {
     constexpr Vec3& operator+=(Vec3 o) { x += o.x; y += o.y; z += o.z; return *this; }
     constexpr Vec3& operator-=(Vec3 o) { x -= o.x; y -= o.y; z -= o.z; return *this; }
     constexpr Vec3& operator*=(float s) { x *= s; y *= s; z *= s; return *this; }
+    constexpr bool operator==(const Vec3&) const = default;
 };
 
 constexpr Vec3 operator*(float s, Vec3 v) { return v * s; }
