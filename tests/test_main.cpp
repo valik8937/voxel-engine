@@ -58,6 +58,27 @@ std::uint32_t next_random(std::uint32_t& state) {
     return state;
 }
 
+void test_math_transforms() {
+    using namespace vox;
+
+    const Vec3 translated = transform_point(Mat4::translation({1.0f, 2.0f, 3.0f}),
+                                            {0.0f, 0.0f, 0.0f});
+    CHECK(std::abs(translated.x - 1.0f) < 1.0e-5f);
+    CHECK(std::abs(translated.y - 2.0f) < 1.0e-5f);
+    CHECK(std::abs(translated.z - 3.0f) < 1.0e-5f);
+
+    const Quat quarter_turn = Quat::from_axis_angle({0.0f, 1.0f, 0.0f}, kPi * 0.5f);
+    const Vec3 rotated = transform_point(quarter_turn.to_mat4(), {1.0f, 0.0f, 0.0f});
+    CHECK(std::abs(rotated.x) < 1.0e-5f);
+    CHECK(std::abs(rotated.z + 1.0f) < 1.0e-5f);
+
+    const Mat4 transform = Mat4::trs({1.0f, 0.0f, 0.0f}, quarter_turn,
+                                     {2.0f, 2.0f, 2.0f});
+    const Vec3 point = transform_point(transform, {1.0f, 0.0f, 0.0f});
+    CHECK(std::abs(point.x - 1.0f) < 1.0e-5f);
+    CHECK(std::abs(point.z + 2.0f) < 1.0e-5f);
+}
+
 void test_binary() {
     vox::BinaryWriter writer;
     writer.u8(0x12);
@@ -718,6 +739,7 @@ void test_job_system() {
 } // namespace
 
 int main() {
+    test_math_transforms();
     test_binary();
     test_zstd();
     test_chunk_rle();

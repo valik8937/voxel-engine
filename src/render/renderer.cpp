@@ -15,8 +15,9 @@
 namespace vox {
 namespace {
 
-struct CameraUniforms {
+struct SceneUniforms {
     float view_proj[16];
+    float model[16];
 };
 
 struct FogUniforms {
@@ -390,6 +391,49 @@ void Renderer::update_world(const World& world) {
     }
 }
 
+RenderObjectId Renderer::create_object(const ChunkMesh& local_mesh) {
+    if (device_ == nullptr || local_mesh.empty()) {
+        return kInvalidRenderObject;
+    }
+    GpuObject object;
+    upload_mesh(object.mesh, local_mesh);
+    if (object.mesh.index_count == 0) {
+        return kInvalidRenderObject;
+    }
+    const RenderObjectId id = next_object_id_++;
+    objects_.emplace(id, std::move(object));
+    return id;
+}
+
+RenderObjectId Renderer::create_box_object(Vec3 half_extents, Color top, Color side,
+                                           Color bottom) {
+    ChunkMesh mesh;
+    append_box(mesh,
+               Vec3{-half_extents.x, -half_extents.y, -half_extents.z},
+               Vec3{half_extents.x, half_extents.y, half_extents.z},
+               top, side, bottom);
+    mesh.bounds.min = Vec3{-half_extents.x, -half_extents.y, -half_extents.z};
+    mesh.bounds.max = Vec3{half_extents.x, half_extents.y, half_extents.z};
+    return create_object(mesh);
+}
+
+void Renderer::update_object_transform(RenderObjectId object, const Mat4& model) {
+    const auto it = objects_.find(object);
+    if (it != objects_.end()) {
+        it->second.model = model;
+    }
+}
+
+void Renderer::remove_object(RenderObjectId object) {
+    const auto it = objects_.find(object);
+    if (it == objects_.end()) {
+        return;
+    }
+    SDL_WaitForGPUIdle(device_);
+    release_mesh(it->second.mesh);
+    objects_.erase(it);
+}
+
 void Renderer::update_players(std::span<const PlayerRenderInfo> players) {
     if (device_ == nullptr) {
         return;
@@ -662,6 +706,11 @@ void Renderer::release_all_meshes() {
         release_mesh(mesh);
     }
     meshes_.clear();
+    for (auto& [id, object] : objects_) {
+        (void)id;
+        release_mesh(object.mesh);
+    }
+    objects_.clear();
     release_mesh(player_mesh_);
     player_vertex_capacity_ = 0;
     player_index_capacity_ = 0;
@@ -717,12 +766,16 @@ void Renderer::render(const Camera& camera) {
         return;
     }
 
-    CameraUniforms camera_uniforms{};
     const float aspect = static_cast<float>(width_) / static_cast<float>(std::max(1, height_));
     const Mat4 view_projection = camera.view_projection(aspect);
-    std::memcpy(camera_uniforms.view_proj, view_projection.m, sizeof(camera_uniforms.view_proj));
-    SDL_PushGPUVertexUniformData(command_buffer_, 0, &camera_uniforms,
-                                 sizeof(camera_uniforms));
+
+    const auto push_scene = [&](const Mat4& model) {
+        SceneUniforms uniforms{};
+        std::memcpy(uniforms.view_proj, view_projection.m, sizeof(uniforms.view_proj));
+        std::memcpy(uniforms.model, model.m, sizeof(uniforms.model));
+        SDL_PushGPUVertexUniformData(command_buffer_, 0, &uniforms, sizeof(uniforms));
+    };
+    push_scene(Mat4::identity());
 
     FogUniforms fog{};
     fog.fog_color[0] = 0.55f;
@@ -789,6 +842,13 @@ void Renderer::render(const Camera& camera) {
             draw_mesh(mesh);
         }
         draw_mesh(player_mesh_);
+
+        for (const auto& [id, object] : objects_) {
+            (void)id;
+            push_scene(object.model);
+            draw_mesh(object.mesh);
+        }
+        push_scene(Mat4::identity());
     }
 
     if (hud_pipeline_ != nullptr) {

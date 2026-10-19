@@ -75,6 +75,34 @@ struct Aabb {
     }
 };
 
+struct Mat4;
+
+struct Quat {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float w = 1.0f;
+
+    static constexpr Quat identity() { return {}; }
+
+    static Quat from_axis_angle(Vec3 axis, float angle) {
+        axis = normalize(axis);
+        const float half = angle * 0.5f;
+        const float s = std::sin(half);
+        return Quat{axis.x * s, axis.y * s, axis.z * s, std::cos(half)};
+    }
+
+    [[nodiscard]] Quat normalized() const {
+        const float len = std::sqrt(x * x + y * y + z * z + w * w);
+        if (len < 1.0e-8f) {
+            return identity();
+        }
+        return Quat{x / len, y / len, z / len, w / len};
+    }
+
+    [[nodiscard]] Mat4 to_mat4() const;
+};
+
 struct Mat4 {
     // Column-major, like OpenGL/Vulkan.
     float m[16]{};
@@ -83,6 +111,27 @@ struct Mat4 {
         Mat4 r;
         r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f;
         return r;
+    }
+
+    static constexpr Mat4 translation(Vec3 t) {
+        Mat4 r = identity();
+        r.m[12] = t.x;
+        r.m[13] = t.y;
+        r.m[14] = t.z;
+        return r;
+    }
+
+    static constexpr Mat4 scale(Vec3 s) {
+        Mat4 r{};
+        r.m[0] = s.x;
+        r.m[5] = s.y;
+        r.m[10] = s.z;
+        r.m[15] = 1.0f;
+        return r;
+    }
+
+    static constexpr Mat4 trs(Vec3 translation, Quat rotation, Vec3 scale) {
+        return Mat4::translation(translation) * rotation.to_mat4() * Mat4::scale(scale);
     }
 
     constexpr Mat4 operator*(const Mat4& o) const {
@@ -101,6 +150,46 @@ struct Mat4 {
 };
 
 // Right-handed perspective with Vulkan/SDL_GPU clip depth in [0, 1].
+inline Vec3 transform_point(const Mat4& matrix, Vec3 point) {
+    const float x = matrix.m[0] * point.x + matrix.m[4] * point.y +
+                    matrix.m[8] * point.z + matrix.m[12];
+    const float y = matrix.m[1] * point.x + matrix.m[5] * point.y +
+                    matrix.m[9] * point.z + matrix.m[13];
+    const float z = matrix.m[2] * point.x + matrix.m[6] * point.y +
+                    matrix.m[10] * point.z + matrix.m[14];
+    const float w = matrix.m[3] * point.x + matrix.m[7] * point.y +
+                    matrix.m[11] * point.z + matrix.m[15];
+    if (std::abs(w) > 1.0e-8f) {
+        return Vec3{x / w, y / w, z / w};
+    }
+    return Vec3{x, y, z};
+}
+
+inline Mat4 Quat::to_mat4() const {
+    const Quat q = normalized();
+    Mat4 r = Mat4::identity();
+    const float xx = q.x * q.x;
+    const float yy = q.y * q.y;
+    const float zz = q.z * q.z;
+    const float xy = q.x * q.y;
+    const float xz = q.x * q.z;
+    const float yz = q.y * q.z;
+    const float wx = q.w * q.x;
+    const float wy = q.w * q.y;
+    const float wz = q.w * q.z;
+
+    r.m[0] = 1.0f - 2.0f * (yy + zz);
+    r.m[1] = 2.0f * (xy + wz);
+    r.m[2] = 2.0f * (xz - wy);
+    r.m[4] = 2.0f * (xy - wz);
+    r.m[5] = 1.0f - 2.0f * (xx + zz);
+    r.m[6] = 2.0f * (yz + wx);
+    r.m[8] = 2.0f * (xz + wy);
+    r.m[9] = 2.0f * (yz - wx);
+    r.m[10] = 1.0f - 2.0f * (xx + yy);
+    return r;
+}
+
 inline Mat4 perspective(float fov_y_radians, float aspect, float near_z, float far_z) {
     Mat4 r{};
     const float f = 1.0f / std::tan(fov_y_radians * 0.5f);

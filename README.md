@@ -82,6 +82,12 @@ Headless smoke test (no window, useful for CI):
 ./build/release/voxel_client --singleplayer --headless --radius 3 --timeout 10
 ```
 
+Moving-object demo (renders a rotating box with its own model matrix):
+
+```sh
+./build/release/voxel_client --singleplayer --radius 4 --demo-ship
+```
+
 Benchmark:
 
 ```sh
@@ -104,6 +110,7 @@ Zstandard. The rendered client holds 60 FPS at 1600x900 with radius 12
 - Mouse: look.
 - `LMB`: break block.
 - `RMB`: place stone.
+- `--demo-ship`: spawn a rotating box demonstrating per-object model matrices.
 
 ## Layout
 

@@ -34,6 +34,7 @@ struct Options {
     bool headless = false;
     bool edit_test = true;
     bool stay = false;
+    bool demo_ship = false;
     std::string host = "127.0.0.1";
     std::uint16_t port = 7777;
     std::string name = "player";
@@ -79,12 +80,15 @@ Options parse_args(int argc, char** argv) {
             options.seed = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--stay") {
             options.stay = true;
+        } else if (arg == "--demo-ship") {
+            options.demo_ship = true;
         } else if (arg == "--no-edit") {
             options.edit_test = false;
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: voxel_client [--singleplayer | --connect host:port] "
                          "[--headless] [--name NAME] [--radius N] [--vertical-radius N] "
-                         "[--timeout SEC] [--seed N] [--stay] [--no-edit]\n";
+                         "[--timeout SEC] [--seed N] [--stay] [--demo-ship] "
+                         "[--no-edit]\n";
             std::exit(0);
         } else {
             std::cerr << "Unknown argument: " << arg << "\n";
@@ -283,6 +287,8 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
     std::size_t expected_chunks = 0;
     std::vector<vox::PlayerRenderInfo> remote_players;
     remote_players.reserve(16);
+    vox::RenderObjectId demo_ship = vox::kInvalidRenderObject;
+    vox::Vec3 demo_ship_anchor{};
 
     const auto refresh_local_collision = [&](int x, int y, int z) {
         if (!collision_streamer) {
@@ -378,6 +384,16 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                 }
             }
             chunks_requested = true;
+            if (options.demo_ship) {
+                demo_ship = renderer.create_box_object(
+                    {1.5f, 0.5f, 2.5f},
+                    vox::Color{210, 120, 70, 255},
+                    vox::Color{170, 85, 50, 255},
+                    vox::Color{110, 60, 40, 255});
+                demo_ship_anchor = vox::Vec3{welcome.spawn_x + 3.0f,
+                                             welcome.spawn_y + 3.0f,
+                                             welcome.spawn_z - 7.0f};
+            }
             std::cout << "Connected to world, spawn " << welcome.spawn_x << ","
                       << welcome.spawn_y << "," << welcome.spawn_z << ", requested "
                       << expected_chunks << " chunks\n";
@@ -556,6 +572,16 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                 camera.position = character_position +
                                   vox::Vec3{0.0f, vox::kPlayerEyeHeight, 0.0f};
             }
+        }
+
+        if (demo_ship != vox::kInvalidRenderObject) {
+            const float angle = static_cast<float>(now) * 0.8f;
+            const vox::Vec3 bob = vox::Vec3{0.0f, std::sin(angle * 0.7f) * 0.35f, 0.0f};
+            renderer.update_object_transform(
+                demo_ship,
+                vox::Mat4::trs(demo_ship_anchor + bob,
+                               vox::Quat::from_axis_angle({0.0f, 1.0f, 0.0f}, angle),
+                               {1.0f, 1.0f, 1.0f}));
         }
 
         renderer.update_world(client.world());

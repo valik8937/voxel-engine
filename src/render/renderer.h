@@ -30,6 +30,9 @@ struct PlayerRenderInfo {
     bool operator==(const PlayerRenderInfo&) const = default;
 };
 
+using RenderObjectId = std::uint64_t;
+inline constexpr RenderObjectId kInvalidRenderObject = 0;
+
 class Renderer {
 public:
     Renderer() = default;
@@ -46,6 +49,14 @@ public:
     void update_world(const World& world);
     void update_players(std::span<const PlayerRenderInfo> players);
 
+    // Local-space meshes with their own model matrix. This is the foundation
+    // for ships, rotating stations and other movable constructs.
+    [[nodiscard]] RenderObjectId create_object(const ChunkMesh& local_mesh);
+    [[nodiscard]] RenderObjectId create_box_object(Vec3 half_extents, Color top,
+                                                   Color side, Color bottom);
+    void update_object_transform(RenderObjectId object, const Mat4& model);
+    void remove_object(RenderObjectId object);
+
     [[nodiscard]] bool begin_frame();
     void render(const Camera& camera);
     void end_frame();
@@ -55,7 +66,8 @@ public:
     [[nodiscard]] int width() const noexcept { return width_; }
     [[nodiscard]] int height() const noexcept { return height_; }
     [[nodiscard]] std::size_t mesh_count() const noexcept {
-        return meshes_.size() + (player_mesh_.index_count != 0 ? 1u : 0u);
+        return meshes_.size() + objects_.size() +
+               (player_mesh_.index_count != 0 ? 1u : 0u);
     }
 
 private:
@@ -94,7 +106,14 @@ private:
     int height_ = 0;
     bool vsync_ = true;
 
+    struct GpuObject {
+        GpuMesh mesh;
+        Mat4 model = Mat4::identity();
+    };
+
     std::unordered_map<ChunkCoord, GpuMesh, ChunkCoordHash> meshes_;
+    std::unordered_map<RenderObjectId, GpuObject> objects_;
+    RenderObjectId next_object_id_ = 1;
     GpuMesh player_mesh_;
     std::uint32_t player_vertex_capacity_ = 0;
     std::uint32_t player_index_capacity_ = 0;
