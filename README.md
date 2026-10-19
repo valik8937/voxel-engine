@@ -29,6 +29,8 @@ Working:
 - Client-authoritative first-person movement on Jolt `CharacterVirtual`, with
   chunk collision streaming. The server validates speed/teleport distance and
   rejects movement into solid blocks.
+- Fixed 30 Hz player simulation with camera interpolation between the previous
+  and current physics positions, plus interpolated remote snapshots.
 - Safe spawn search, collision-readiness gating and a fall-out respawn guard.
 - Block breaking/placing with server-side reach validation.
 - Remote player boxes from server snapshots.
@@ -143,7 +145,8 @@ benchmarks     chunk generation / memory benchmarks
   values, maximum displacement (with a teleport flag for respawns) and rejects
   positions inside solid blocks with `MoveReject`.
 - Snapshots are unreliable and broadcast the accepted player positions and
-  last accepted move sequence.
+  last accepted move sequence. Remote players are rendered one snapshot behind
+  and interpolated between the last two snapshots.
 - Block edits are validated for reach and block ID, applied on the server, then
   broadcast as `BlockUpdate`.
 - Only modified chunks are persisted; unmodified terrain is deterministic from

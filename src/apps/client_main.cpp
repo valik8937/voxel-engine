@@ -20,7 +20,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -272,6 +274,8 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
     std::unique_ptr<vox::CollisionStreamer> collision_streamer;
     vox::PhysicsCharacter local_character = vox::kInvalidPhysicsCharacter;
     vox::ChunkCoord local_spawn_chunk{};
+    vox::Vec3 prev_character_position{};
+    vox::Vec3 curr_character_position{};
     bool local_collision_ready = false;
     bool chunks_requested = false;
     bool running = true;
@@ -289,6 +293,10 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
     std::size_t expected_chunks = 0;
     std::vector<vox::PlayerRenderInfo> remote_players;
     remote_players.reserve(16);
+    std::optional<vox::net::Snapshot> previous_remote_snapshot;
+    std::optional<vox::net::Snapshot> current_remote_snapshot;
+    std::uint32_t last_remote_tick = std::numeric_limits<std::uint32_t>::max();
+    double remote_snapshot_time = 0.0;
     vox::RenderObjectId demo_ship = vox::kInvalidRenderObject;
     vox::Vec3 demo_ship_anchor{};
 
@@ -338,17 +346,42 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
         }
         client.poll(0);
 
+        if (client.last_snapshot() &&
+            client.last_snapshot()->tick != last_remote_tick) {
+            last_remote_tick = client.last_snapshot()->tick;
+            previous_remote_snapshot = current_remote_snapshot;
+            current_remote_snapshot = *client.last_snapshot();
+            remote_snapshot_time = now;
+        }
+
         remote_players.clear();
-        if (client.welcome() && client.last_snapshot()) {
-            for (const vox::net::PlayerState& state : client.last_snapshot()->players) {
+        if (client.welcome() && current_remote_snapshot) {
+            // Render remote players one snapshot behind and interpolate between
+            // the last two snapshots. The server sends snapshots at ~15 Hz.
+            constexpr double kRemoteSnapshotInterval = 1.0 / 15.0;
+            const float alpha = std::clamp(
+                static_cast<float>((now - remote_snapshot_time) /
+                                   kRemoteSnapshotInterval),
+                0.0f, 1.0f);
+
+            for (const vox::net::PlayerState& state : current_remote_snapshot->players) {
                 if (state.player_id == client.player_id()) {
                     continue;
                 }
+                vox::Vec3 position{state.x, state.y, state.z};
+                if (previous_remote_snapshot) {
+                    for (const vox::net::PlayerState& previous :
+                         previous_remote_snapshot->players) {
+                        if (previous.player_id == state.player_id) {
+                            position = vox::lerp(
+                                vox::Vec3{previous.x, previous.y, previous.z},
+                                position, alpha);
+                            break;
+                        }
+                    }
+                }
                 remote_players.push_back(vox::PlayerRenderInfo{
-                    state.player_id,
-                    vox::Vec3{state.x, state.y, state.z},
-                    state.yaw,
-                });
+                    state.player_id, position, state.yaw});
             }
         }
         renderer.update_players(remote_players);
@@ -367,8 +400,10 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                     {welcome.spawn_x, welcome.spawn_y, welcome.spawn_z});
             }
 
-            camera.position = vox::Vec3{welcome.spawn_x, welcome.spawn_y,
-                                        welcome.spawn_z} +
+            prev_character_position = {welcome.spawn_x, welcome.spawn_y,
+                                       welcome.spawn_z};
+            curr_character_position = prev_character_position;
+            camera.position = curr_character_position +
                               vox::Vec3{0.0f, vox::kPlayerEyeHeight, 0.0f};
             camera.pitch = -0.15f;
             const int min_chunk_y =
@@ -538,12 +573,14 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                         continue;
                     }
 
+                    prev_character_position = curr_character_position;
                     physics.step_character(local_character,
                                            vox::player_wish_velocity(input),
                                            input.jump, kGravity, kInputStep);
-
-                    const vox::Vec3 position =
+                    curr_character_position =
                         physics.character_position(local_character);
+
+                    const vox::Vec3 position = curr_character_position;
                     const vox::Vec3 velocity =
                         physics.character_velocity(local_character);
 
@@ -567,26 +604,33 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                 if (const auto& reject = client.last_move_reject()) {
                     if (reject->sequence >= last_reject_sequence) {
                         last_reject_sequence = reject->sequence;
-                        physics.set_character_position(
-                            local_character, {reject->x, reject->y, reject->z});
+                        const vox::Vec3 rejected_position{reject->x, reject->y,
+                                                          reject->z};
+                        physics.set_character_position(local_character,
+                                                       rejected_position);
+                        prev_character_position = rejected_position;
+                        curr_character_position = rejected_position;
                         VOX_LOG_WARN("Move rejected (reason {}), snapped to {:.1f},{:.1f},{:.1f}",
                                      reject->reason, reject->x, reject->y, reject->z);
                     }
                     client.clear_move_reject();
                 }
 
-                vox::Vec3 character_position =
-                    physics.character_position(local_character);
-                if (character_position.y < -16.0f && client.welcome()) {
+                if (curr_character_position.y < -16.0f && client.welcome()) {
                     const vox::Vec3 respawn{client.welcome()->spawn_x,
                                             client.welcome()->spawn_y,
                                             client.welcome()->spawn_z};
                     physics.set_character_position(local_character, respawn);
-                    character_position = respawn;
+                    prev_character_position = respawn;
+                    curr_character_position = respawn;
                     teleport_next_move = true;
                 }
-                camera.position = character_position +
-                                  vox::Vec3{0.0f, vox::kPlayerEyeHeight, 0.0f};
+
+                const float alpha = std::clamp(
+                    input_accumulator / (1.0f / 30.0f), 0.0f, 1.0f);
+                camera.position =
+                    vox::lerp(prev_character_position, curr_character_position, alpha) +
+                    vox::Vec3{0.0f, vox::kPlayerEyeHeight, 0.0f};
             }
         }
 
