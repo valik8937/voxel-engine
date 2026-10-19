@@ -134,6 +134,7 @@ bool GameClient::request_chunk(ChunkCoord coord) {
     }
     ChunkRequest request;
     request.x = coord.x;
+    request.y = coord.y;
     request.z = coord.z;
     request.request_id = next_request_id_++;
     const auto packet = encode_chunk_request(request);
@@ -233,7 +234,7 @@ void GameClient::handle_packet(_ENetPacket* packet) {
                 VOX_LOG_WARN("Chunk {},{} failed to deserialize", chunk_data.x, chunk_data.z);
                 return;
             }
-            if (chunk.coord() != ChunkCoord{chunk_data.x, chunk_data.z}) {
+            if (chunk.coord() != ChunkCoord{chunk_data.x, chunk_data.y, chunk_data.z}) {
                 VOX_LOG_WARN("Chunk coordinate mismatch");
                 return;
             }

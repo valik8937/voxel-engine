@@ -35,6 +35,7 @@ struct Options {
     std::uint16_t port = 7777;
     std::string name = "player";
     int radius = 6;
+    int vertical_radius = 2;
     float timeout_seconds = 15.0f;
     std::uint32_t seed = 1337;
 };
@@ -67,6 +68,8 @@ Options parse_args(int argc, char** argv) {
             options.name = argv[++i];
         } else if (arg == "--radius" && i + 1 < argc) {
             options.radius = std::stoi(argv[++i]);
+        } else if (arg == "--vertical-radius" && i + 1 < argc) {
+            options.vertical_radius = std::stoi(argv[++i]);
         } else if (arg == "--timeout" && i + 1 < argc) {
             options.timeout_seconds = std::stof(argv[++i]);
         } else if (arg == "--seed" && i + 1 < argc) {
@@ -77,8 +80,8 @@ Options parse_args(int argc, char** argv) {
             options.edit_test = false;
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: voxel_client [--singleplayer | --connect host:port] "
-                         "[--headless] [--name NAME] [--radius N] [--timeout SEC] "
-                         "[--seed N] [--stay] [--no-edit]\n";
+                         "[--headless] [--name NAME] [--radius N] [--vertical-radius N] "
+                         "[--timeout SEC] [--seed N] [--stay] [--no-edit]\n";
             std::exit(0);
         } else {
             std::cerr << "Unknown argument: " << arg << "\n";
@@ -138,13 +141,21 @@ int run_headless(const Options& options, vox::net::GameServer* server) {
     const auto welcome = *client.welcome();
     const auto spawn_chunk = vox::chunk_coord_at(
         static_cast<std::int64_t>(welcome.spawn_x),
+        static_cast<std::int64_t>(welcome.spawn_y),
         static_cast<std::int64_t>(welcome.spawn_z));
+    const int min_chunk_y =
+        std::max(0, spawn_chunk.y - options.vertical_radius);
+    const int max_chunk_y =
+        std::min(vox::kWorldHeightChunks - 1, spawn_chunk.y + options.vertical_radius);
 
     std::size_t expected_chunks = 0;
-    for (int z = -options.radius; z <= options.radius; ++z) {
-        for (int x = -options.radius; x <= options.radius; ++x) {
-            (void)client.request_chunk(vox::ChunkCoord{spawn_chunk.x + x, spawn_chunk.z + z});
-            ++expected_chunks;
+    for (int y = min_chunk_y; y <= max_chunk_y; ++y) {
+        for (int z = -options.radius; z <= options.radius; ++z) {
+            for (int x = -options.radius; x <= options.radius; ++x) {
+                (void)client.request_chunk(
+                    vox::ChunkCoord{spawn_chunk.x + x, y, spawn_chunk.z + z});
+                ++expected_chunks;
+            }
         }
     }
 
@@ -169,8 +180,9 @@ int run_headless(const Options& options, vox::net::GameServer* server) {
         if (chunk) {
             const int lx = vox::local_x(static_cast<std::int64_t>(welcome.spawn_x));
             const int lz = vox::local_z(static_cast<std::int64_t>(welcome.spawn_z));
-            const int y = chunk->highest_solid(lx, lz);
-            if (y > 1) {
+            const int local_y = chunk->highest_solid(lx, lz);
+            const int y = spawn_chunk.y * vox::kChunkSizeY + local_y;
+            if (local_y > 1) {
                 const auto world_x = spawn_chunk.x * vox::kChunkSizeX + lx;
                 const auto world_z = spawn_chunk.z * vox::kChunkSizeZ + lz;
                 std::cout << "Edit test: set (" << world_x << "," << y << "," << world_z
@@ -310,15 +322,23 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
             has_local_player = true;
             local_spawn_chunk = vox::chunk_coord_at(
                 static_cast<std::int64_t>(welcome.spawn_x),
+                static_cast<std::int64_t>(welcome.spawn_y),
                 static_cast<std::int64_t>(welcome.spawn_z));
             camera.position = local_player.position +
                               vox::Vec3{0.0f, vox::kPlayerEyeHeight, 0.0f};
             camera.pitch = -0.15f;
-            for (int z = -options.radius; z <= options.radius; ++z) {
-                for (int x = -options.radius; x <= options.radius; ++x) {
-                    (void)client.request_chunk(vox::ChunkCoord{
-                        local_spawn_chunk.x + x, local_spawn_chunk.z + z});
-                    ++expected_chunks;
+            const int min_chunk_y =
+                std::max(0, local_spawn_chunk.y - options.vertical_radius);
+            const int max_chunk_y =
+                std::min(vox::kWorldHeightChunks - 1,
+                         local_spawn_chunk.y + options.vertical_radius);
+            for (int y = min_chunk_y; y <= max_chunk_y; ++y) {
+                for (int z = -options.radius; z <= options.radius; ++z) {
+                    for (int x = -options.radius; x <= options.radius; ++x) {
+                        (void)client.request_chunk(vox::ChunkCoord{
+                            local_spawn_chunk.x + x, y, local_spawn_chunk.z + z});
+                        ++expected_chunks;
+                    }
                 }
             }
             chunks_requested = true;
@@ -379,7 +399,7 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                                           static_cast<float>(py + 1),
                                           static_cast<float>(pz + 1)},
                             };
-                            if (py >= 0 && py < vox::kChunkSizeY &&
+                            if (py >= 0 && py < vox::kWorldHeight &&
                                 !target.overlaps(vox::player_aabb(local_player.position))) {
                                 (void)client.send_block_edit(px, static_cast<std::uint16_t>(py),
                                                              pz, vox::blocks::Stone);

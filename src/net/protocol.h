@@ -60,12 +60,14 @@ struct Welcome {
 
 struct ChunkRequest {
     std::int32_t x = 0;
+    std::int32_t y = 0;
     std::int32_t z = 0;
     std::uint32_t request_id = 0;
 };
 
 struct ChunkData {
     std::int32_t x = 0;
+    std::int32_t y = 0;
     std::int32_t z = 0;
     std::uint32_t revision = 0;
     std::uint32_t uncompressed_size = 0;

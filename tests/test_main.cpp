@@ -111,7 +111,7 @@ void test_zstd() {
 void test_chunk_rle() {
     using namespace vox;
 
-    Chunk chunk = Chunk::make_flat(ChunkCoord{0, 0}, blocks::Air);
+    Chunk chunk = Chunk::make_flat(ChunkCoord{0, 0, 0}, blocks::Air);
     CHECK(chunk.validate());
     CHECK_EQ(chunk.run_count(), static_cast<std::size_t>(kChunkColumns));
 
@@ -149,7 +149,7 @@ void test_chunk_rle() {
 
     BinaryWriter writer;
     chunk.serialize(writer);
-    CHECK(writer.size() < kChunkVoxelCount);
+    CHECK(writer.size() < kChunkVoxelCount * 4);
 
     Chunk restored;
     BinaryReader reader(writer.data());
@@ -173,8 +173,8 @@ void test_chunk_rle() {
     vox::World world;
     world.insert(std::make_shared<Chunk>(std::move(chunk)));
     CHECK_EQ(world.chunk_count(), 1u);
-    CHECK(world.get(ChunkCoord{0, 0}) != nullptr);
-    CHECK(world.get(ChunkCoord{1, 0}) == nullptr);
+    CHECK(world.get(ChunkCoord{0, 0, 0}) != nullptr);
+    CHECK(world.get(ChunkCoord{1, 0, 0}) == nullptr);
 }
 
 void test_generator() {
@@ -184,13 +184,14 @@ void test_generator() {
     WorldGenerator generator(spec);
     CHECK(generator.spec_hash() != 0);
 
-    const ChunkCoord coord{0, 0};
+    const int surface_y = static_cast<int>(generator.height_at(0, 0));
+    const ChunkCoord coord{0, surface_y / kChunkSizeY, 0};
     Chunk a = generator.generate(coord);
     Chunk b = generator.generate(coord);
     CHECK(a.validate());
     CHECK_EQ(a.run_count(), b.run_count());
     CHECK_EQ(a.revision(), 0u);
-    CHECK(a.memory_bytes() < kChunkVoxelCount);
+    CHECK(a.memory_bytes() < kChunkVoxelCount * 2);
 
     BinaryWriter wa;
     BinaryWriter wb;
@@ -200,16 +201,21 @@ void test_generator() {
 
     std::size_t water = 0;
     std::size_t stone = 0;
+    std::size_t solid_columns = 0;
     for (int z = 0; z < kChunkSizeZ; z += 4) {
         for (int x = 0; x < kChunkSizeX; x += 4) {
             const int height = a.highest_solid(x, z);
-            CHECK(height >= 0);
+            CHECK(height >= -1);
             CHECK(height < kChunkSizeY);
+            if (height >= 0) {
+                ++solid_columns;
+            }
             water += a.column_block_count(x, z, blocks::Water);
             stone += a.column_block_count(x, z, blocks::Stone);
         }
     }
     CHECK(wa.size() > 0);
+    CHECK(solid_columns > 0);
     CHECK(stone > 0 || water > 0);
 
     const float height = generator.height_at(123, -456);
@@ -238,6 +244,7 @@ void test_protocol() {
     {
         ChunkData data;
         data.x = -3;
+        data.y = 5;
         data.z = 7;
         data.revision = 42;
         data.uncompressed_size = 100;
@@ -250,6 +257,7 @@ void test_protocol() {
         ChunkData decoded;
         CHECK(decode_chunk_data(view->payload, decoded));
         CHECK_EQ(decoded.x, data.x);
+        CHECK_EQ(decoded.y, data.y);
         CHECK_EQ(decoded.z, data.z);
         CHECK_EQ(decoded.revision, data.revision);
         CHECK(decoded.compressed == data.compressed);
@@ -347,6 +355,7 @@ void test_integration() {
     if (client.welcome()) {
         const auto spawn_chunk = chunk_coord_at(
             static_cast<std::int64_t>(client.welcome()->spawn_x),
+            static_cast<std::int64_t>(client.welcome()->spawn_y),
             static_cast<std::int64_t>(client.welcome()->spawn_z));
         CHECK(client.request_chunk(spawn_chunk));
 
@@ -365,9 +374,10 @@ void test_integration() {
         if (server_chunk) {
             const int lx = local_x(static_cast<std::int64_t>(client.welcome()->spawn_x));
             const int lz = local_z(static_cast<std::int64_t>(client.welcome()->spawn_z));
-            const int y = server_chunk->highest_solid(lx, lz);
-            CHECK(y > 1);
-            if (y > 1) {
+            const int local_surface = server_chunk->highest_solid(lx, lz);
+            const int y = spawn_chunk.y * kChunkSizeY + local_surface;
+            CHECK(local_surface > 0);
+            if (local_surface > 0) {
                 const auto world_x = spawn_chunk.x * kChunkSizeX + lx;
                 const auto world_z = spawn_chunk.z * kChunkSizeZ + lz;
                 CHECK(client.send_block_edit(world_x, static_cast<std::uint16_t>(y),
@@ -424,20 +434,19 @@ void test_raycast() {
 
     std::vector<Run> runs;
     for (int i = 0; i < kChunkColumns; ++i) {
-        runs.push_back(Run{blocks::Stone, 64});
-        runs.push_back(Run{blocks::Air, kChunkSizeY - 64});
+        runs.push_back(Run{blocks::Stone, kChunkSizeY});
     }
     World world;
     world.insert(std::make_shared<Chunk>(
-        Chunk::from_runs(ChunkCoord{0, 0}, 0, std::move(runs))));
+        Chunk::from_runs(ChunkCoord{0, 0, 0}, 0, std::move(runs))));
 
-    const RaycastHit hit = raycast_voxels(world, {16.5f, 70.0f, 16.5f},
+    const RaycastHit hit = raycast_voxels(world, {16.5f, 40.0f, 16.5f},
                                           {0.0f, -1.0f, 0.0f}, 10.0f);
     CHECK(hit.hit);
-    CHECK_EQ(hit.y, 63);
+    CHECK_EQ(hit.y, 31);
     CHECK_EQ(hit.normal_y, 1);
 
-    const RaycastHit miss = raycast_voxels(world, {16.5f, 70.0f, 16.5f},
+    const RaycastHit miss = raycast_voxels(world, {16.5f, 40.0f, 16.5f},
                                            {0.0f, 1.0f, 0.0f}, 10.0f);
     CHECK(!miss.hit);
 }
@@ -448,22 +457,21 @@ void test_player_controller() {
     std::vector<Run> runs;
     runs.reserve(static_cast<std::size_t>(kChunkColumns) * 2);
     for (int i = 0; i < kChunkColumns; ++i) {
-        runs.push_back(Run{blocks::Stone, 64});
-        runs.push_back(Run{blocks::Air, kChunkSizeY - 64});
+        runs.push_back(Run{blocks::Stone, kChunkSizeY});
     }
     World world;
     world.insert(std::make_shared<Chunk>(
-        Chunk::from_runs(ChunkCoord{0, 0}, 0, std::move(runs))));
+        Chunk::from_runs(ChunkCoord{0, 0, 0}, 0, std::move(runs))));
 
     PlayerMoveState state;
-    state.position = Vec3{16.0f, 70.0f, 16.0f};
+    state.position = Vec3{16.0f, 40.0f, 16.0f};
     PlayerMoveInput idle;
     for (int i = 0; i < 180; ++i) {
         step_player(world, state, idle, 1.0f / 60.0f);
     }
     CHECK(state.on_ground);
-    CHECK(state.position.y > 63.5f);
-    CHECK(state.position.y < 65.0f);
+    CHECK(state.position.y > 31.5f);
+    CHECK(state.position.y < 33.0f);
 
     const float start_z = state.position.z;
     PlayerMoveInput forward;
@@ -488,7 +496,7 @@ void test_physics() {
         10.0f, 0.0f, -10.0f,
     };
     const std::uint32_t ground_indices[] = {0, 1, 2, 0, 2, 3};
-    physics.add_static_triangles(vox::ChunkCoord{0, 0}, ground, ground_indices);
+    physics.add_static_triangles(vox::ChunkCoord{0, 0, 0}, ground, ground_indices);
 
     const vox::PhysicsBody box = physics.add_box({0.0f, 8.0f, 0.0f},
                                                  {0.5f, 0.5f, 0.5f}, true);

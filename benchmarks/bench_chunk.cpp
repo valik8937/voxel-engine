@@ -25,7 +25,10 @@ int main(int argc, char** argv) {
         const int side = 64;
         const int x = static_cast<int>(index % side) - side / 2;
         const int z = static_cast<int>(index / side) - side / 2;
-        chunks[index] = generator.generate(vox::ChunkCoord{x, z});
+        const int surface = static_cast<int>(
+            generator.height_at(x * vox::kChunkSizeX + 16, z * vox::kChunkSizeZ + 16));
+        chunks[index] = generator.generate(
+            vox::ChunkCoord{x, surface / vox::kChunkSizeY, z});
     });
     const auto end = std::chrono::steady_clock::now();
 

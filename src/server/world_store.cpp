@@ -17,7 +17,7 @@ namespace vox {
 namespace {
 
 constexpr std::uint32_t kStoreMagic = 0x314b4843u; // "CHK1"
-constexpr std::uint16_t kStoreVersion = 1;
+constexpr std::uint16_t kStoreVersion = 2;
 constexpr std::size_t kMaxStorePayload = 8u * 1024u * 1024u;
 
 } // namespace
@@ -27,7 +27,8 @@ WorldStore::WorldStore(std::filesystem::path directory)
 
 std::filesystem::path WorldStore::chunk_path(ChunkCoord coord) const {
     return directory_ / ("chunk_" + std::to_string(coord.x) + "_" +
-                         std::to_string(coord.z) + ".vch");
+                         std::to_string(coord.y) + "_" + std::to_string(coord.z) +
+                         ".vch");
 }
 
 bool WorldStore::load(World& world) {
@@ -69,6 +70,7 @@ bool WorldStore::load(World& world) {
         const std::uint32_t magic = reader.u32();
         const std::uint16_t version = reader.u16();
         const std::int32_t x = reader.i32();
+        const std::int32_t y = reader.i32();
         const std::int32_t z = reader.i32();
         const std::uint32_t revision = reader.u32();
         const std::uint32_t uncompressed_size = reader.u32();
@@ -98,7 +100,7 @@ bool WorldStore::load(World& world) {
             ++failed;
             continue;
         }
-        if (chunk.coord() != ChunkCoord{x, z} || chunk.revision() != revision) {
+        if (chunk.coord() != ChunkCoord{x, y, z} || chunk.revision() != revision) {
             ++failed;
             continue;
         }
@@ -136,6 +138,7 @@ bool WorldStore::save_chunk(const Chunk& chunk) {
     file_writer.u32(kStoreMagic);
     file_writer.u16(kStoreVersion);
     file_writer.i32(chunk.coord().x);
+    file_writer.i32(chunk.coord().y);
     file_writer.i32(chunk.coord().z);
     file_writer.u32(chunk.revision());
     file_writer.u32(static_cast<std::uint32_t>(chunk_writer.size()));

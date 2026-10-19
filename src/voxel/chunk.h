@@ -12,38 +12,46 @@
 namespace vox {
 
 inline constexpr int kChunkSizeX = 32;
-inline constexpr int kChunkSizeY = 256;
+inline constexpr int kChunkSizeY = 32;
 inline constexpr int kChunkSizeZ = 32;
 inline constexpr int kChunkColumns = kChunkSizeX * kChunkSizeZ;
 inline constexpr std::size_t kChunkVoxelCount =
     static_cast<std::size_t>(kChunkSizeX) * kChunkSizeY * kChunkSizeZ;
 
+// The current flat world still has a finite vertical extent. The chunk format
+// itself is fully 3D and does not depend on this value.
+inline constexpr int kWorldHeight = 256;
+inline constexpr int kWorldHeightChunks = kWorldHeight / kChunkSizeY;
+
 struct ChunkCoord {
     std::int32_t x = 0;
+    std::int32_t y = 0;
     std::int32_t z = 0;
 
     constexpr bool operator==(const ChunkCoord&) const = default;
-
-    [[nodiscard]] constexpr std::uint64_t key() const noexcept {
-        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
-               static_cast<std::uint32_t>(z);
-    }
 };
 
 struct ChunkCoordHash {
     [[nodiscard]] std::size_t operator()(const ChunkCoord& coord) const noexcept {
-        return static_cast<std::size_t>(coord.key() * 0x9e3779b97f4a7c15ull);
+        std::uint64_t h = static_cast<std::uint32_t>(coord.x);
+        h = h * 0x9e3779b97f4a7c15ull + static_cast<std::uint32_t>(coord.y);
+        h = h * 0x9e3779b97f4a7c15ull + static_cast<std::uint32_t>(coord.z);
+        h ^= h >> 29;
+        return static_cast<std::size_t>(h);
     }
 };
 
-constexpr ChunkCoord chunk_coord_at(std::int64_t world_x, std::int64_t world_z) noexcept {
-    const auto floor_div = [](std::int64_t value, std::int64_t divisor) {
-        const std::int64_t q = value / divisor;
-        const std::int64_t r = value % divisor;
-        return (r != 0 && ((r < 0) != (divisor < 0))) ? q - 1 : q;
-    };
+constexpr std::int64_t floor_div(std::int64_t value, std::int64_t divisor) noexcept {
+    const std::int64_t q = value / divisor;
+    const std::int64_t r = value % divisor;
+    return (r != 0 && ((r < 0) != (divisor < 0))) ? q - 1 : q;
+}
+
+constexpr ChunkCoord chunk_coord_at(std::int64_t world_x, std::int64_t world_y,
+                                    std::int64_t world_z) noexcept {
     return ChunkCoord{
         static_cast<std::int32_t>(floor_div(world_x, kChunkSizeX)),
+        static_cast<std::int32_t>(floor_div(world_y, kChunkSizeY)),
         static_cast<std::int32_t>(floor_div(world_z, kChunkSizeZ)),
     };
 }
@@ -53,17 +61,27 @@ constexpr int local_x(std::int64_t world_x) noexcept {
     return v < 0 ? v + kChunkSizeX : v;
 }
 
+constexpr int local_y(std::int64_t world_y) noexcept {
+    const int v = static_cast<int>(world_y % kChunkSizeY);
+    return v < 0 ? v + kChunkSizeY : v;
+}
+
 constexpr int local_z(std::int64_t world_z) noexcept {
     const int v = static_cast<int>(world_z % kChunkSizeZ);
     return v < 0 ? v + kChunkSizeZ : v;
 }
 
-constexpr std::array<ChunkCoord, 9> neighbours_3x3(ChunkCoord center) noexcept {
-    return {{
-        {center.x - 1, center.z - 1}, {center.x, center.z - 1}, {center.x + 1, center.z - 1},
-        {center.x - 1, center.z},     center,                   {center.x + 1, center.z},
-        {center.x - 1, center.z + 1}, {center.x, center.z + 1}, {center.x + 1, center.z + 1},
-    }};
+constexpr std::array<ChunkCoord, 27> neighbours_3x3x3(ChunkCoord center) noexcept {
+    std::array<ChunkCoord, 27> result{};
+    std::size_t index = 0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                result[index++] = ChunkCoord{center.x + dx, center.y + dy, center.z + dz};
+            }
+        }
+    }
+    return result;
 }
 
 struct Run {
@@ -72,8 +90,8 @@ struct Run {
 };
 
 // Runtime chunk representation: a run-length encoded stream of columns.
-// A column is 256 voxels from y=0 upwards. column_offsets has 1025 entries so
-// that column c occupies runs[column_offsets[c] .. column_offsets[c + 1]).
+// A column is 32 voxels from local y=0 upwards. column_offsets has 1025 entries
+// so that column c occupies runs[column_offsets[c] .. column_offsets[c + 1]).
 class Chunk {
 public:
     Chunk() = default;
@@ -85,9 +103,10 @@ public:
                            std::vector<Run> runs);
 
     [[nodiscard]] BlockId get(int x, int y, int z) const noexcept;
-    [[nodiscard]] BlockId get_world(std::int64_t x, int y, std::int64_t z) const noexcept;
+    [[nodiscard]] BlockId get_world(std::int64_t x, std::int64_t y,
+                                    std::int64_t z) const noexcept;
     bool set(int x, int y, int z, BlockId block);
-    bool set_world(std::int64_t x, int y, std::int64_t z, BlockId block);
+    bool set_world(std::int64_t x, std::int64_t y, std::int64_t z, BlockId block);
 
     [[nodiscard]] ChunkCoord coord() const noexcept { return coord_; }
     void set_coord(ChunkCoord coord) noexcept { coord_ = coord; }
@@ -107,7 +126,7 @@ public:
     [[nodiscard]] std::size_t run_count() const noexcept { return runs_.size(); }
     [[nodiscard]] std::size_t memory_bytes() const noexcept;
 
-    // Returns the y of the highest non-air block, or -1 if the column is empty.
+    // Returns the highest non-air y inside this chunk, or -1 if the column is empty.
     [[nodiscard]] int highest_solid(int x, int z) const noexcept;
     [[nodiscard]] std::size_t column_block_count(int x, int z, BlockId block) const noexcept;
 

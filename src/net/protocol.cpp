@@ -76,6 +76,7 @@ bool decode_welcome(std::span<const std::uint8_t> payload, Welcome& out) {
 std::vector<std::uint8_t> encode_chunk_request(const ChunkRequest& message) {
     BinaryWriter payload;
     payload.i32(message.x);
+    payload.i32(message.y);
     payload.i32(message.z);
     payload.u32(message.request_id);
     return make_packet(PacketType::ChunkRequest, payload);
@@ -84,14 +85,16 @@ std::vector<std::uint8_t> encode_chunk_request(const ChunkRequest& message) {
 bool decode_chunk_request(std::span<const std::uint8_t> payload, ChunkRequest& out) {
     BinaryReader reader(payload);
     out.x = reader.i32();
+    out.y = reader.i32();
     out.z = reader.i32();
     out.request_id = reader.u32();
     return reader.ok();
 }
 
 std::vector<std::uint8_t> encode_chunk_data(const ChunkData& message) {
-    BinaryWriter payload(32 + message.compressed.size());
+    BinaryWriter payload(36 + message.compressed.size());
     payload.i32(message.x);
+    payload.i32(message.y);
     payload.i32(message.z);
     payload.u32(message.revision);
     payload.u32(message.uncompressed_size);
@@ -104,6 +107,7 @@ std::vector<std::uint8_t> encode_chunk_data(const ChunkData& message) {
 bool decode_chunk_data(std::span<const std::uint8_t> payload, ChunkData& out) {
     BinaryReader reader(payload);
     out.x = reader.i32();
+    out.y = reader.i32();
     out.z = reader.i32();
     out.revision = reader.u32();
     out.uncompressed_size = reader.u32();

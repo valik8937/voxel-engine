@@ -23,8 +23,9 @@ public:
     [[nodiscard]] std::vector<std::shared_ptr<Chunk>> snapshot() const;
     [[nodiscard]] std::vector<std::shared_ptr<Chunk>> dirty_snapshot() const;
 
-    [[nodiscard]] BlockId get_block(std::int64_t x, int y, std::int64_t z) const;
-    bool set_block(std::int64_t x, int y, std::int64_t z, BlockId block);
+    [[nodiscard]] BlockId get_block(std::int64_t x, std::int64_t y,
+                                    std::int64_t z) const;
+    bool set_block(std::int64_t x, std::int64_t y, std::int64_t z, BlockId block);
 
 private:
     mutable std::mutex mutex_;

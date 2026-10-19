@@ -14,7 +14,7 @@ namespace vox {
 namespace {
 
 constexpr int kHeightGrid = kChunkSizeX / 4 + 1; // 9
-constexpr int kCaveGridY = kChunkSizeY / 4 + 1;  // 65
+constexpr int kCaveGridY = kChunkSizeY / 4 + 1;  // 9
 constexpr int kGridStep = 4;
 
 float smoothstep(float edge0, float edge1, float value) {
@@ -35,7 +35,8 @@ float trilerp(const std::array<float, kHeightGrid * kCaveGridY * kHeightGrid>& g
               int ix, int iy, int iz, float tx, float ty, float tz) {
     const auto at = [&](int x, int y, int z) -> float {
         const std::size_t index =
-            (static_cast<std::size_t>(z) * kCaveGridY + static_cast<std::size_t>(y)) * kHeightGrid +
+            (static_cast<std::size_t>(z) * kCaveGridY + static_cast<std::size_t>(y)) *
+                kHeightGrid +
             static_cast<std::size_t>(x);
         return grid[index];
     };
@@ -51,7 +52,6 @@ BlockId surface_block(Biome biome, bool underwater) {
     switch (biome) {
         case Biome::Desert:
         case Biome::Beach:
-            return blocks::Sand;
         case Biome::Ocean:
             return blocks::Sand;
         case Biome::Snow:
@@ -201,7 +201,7 @@ float WorldGenerator::sample_height(const NoiseSampler& noise,
     height += continent * spec_.continent_amplitude;
     height += hills * spec_.hill_amplitude;
     height += mountain_mask * mountain_value * spec_.mountain_amplitude;
-    return std::clamp(height, 2.0f, static_cast<float>(kChunkSizeY - 2));
+    return std::clamp(height, 2.0f, static_cast<float>(kWorldHeight - 2));
 }
 
 Biome WorldGenerator::sample_biome(const NoiseSampler& noise, float world_x,
@@ -242,13 +242,21 @@ Biome WorldGenerator::biome_at(std::int64_t world_x, std::int64_t world_z) const
 }
 
 Chunk WorldGenerator::generate(ChunkCoord coord) const {
+    if (coord.y < 0 || coord.y >= kWorldHeightChunks) {
+        return Chunk::make_flat(coord, blocks::Air);
+    }
+
     const NoiseSampler noise = noise_bank_.make_sampler();
     const float origin_x = static_cast<float>(coord.x * kChunkSizeX);
     const float origin_z = static_cast<float>(coord.z * kChunkSizeZ);
+    const int origin_y = coord.y * kChunkSizeY;
 
     std::array<float, kHeightGrid * kHeightGrid> height_grid{};
     std::array<Biome, kHeightGrid * kHeightGrid> biome_grid{};
     std::array<float, kHeightGrid * kCaveGridY * kHeightGrid> cave_grid{};
+
+    float chunk_min_height = static_cast<float>(kWorldHeight);
+    float chunk_max_height = 0.0f;
 
     for (int gz = 0; gz < kHeightGrid; ++gz) {
         for (int gx = 0; gx < kHeightGrid; ++gx) {
@@ -258,9 +266,11 @@ Chunk WorldGenerator::generate(ChunkCoord coord) const {
             height_grid[static_cast<std::size_t>(gz) * kHeightGrid + gx] = height;
             biome_grid[static_cast<std::size_t>(gz) * kHeightGrid + gx] =
                 sample_biome(noise, wx, wz, height);
+            chunk_min_height = std::min(chunk_min_height, height);
+            chunk_max_height = std::max(chunk_max_height, height);
 
             for (int gy = 0; gy < kCaveGridY; ++gy) {
-                const float wy = static_cast<float>(gy * kGridStep);
+                const float wy = static_cast<float>(origin_y + gy * kGridStep);
                 const float cave = noise.sample3d(spec_.cave_noise.id, wx, wy, wz);
                 const std::size_t index =
                     (static_cast<std::size_t>(gz) * kCaveGridY +
@@ -272,11 +282,21 @@ Chunk WorldGenerator::generate(ChunkCoord coord) const {
     }
 
     std::vector<Run> runs;
-    runs.reserve(kChunkColumns * 8);
+    runs.reserve(kChunkColumns * 6);
     std::vector<Run> column;
     column.reserve(16);
 
     const int sea_level = static_cast<int>(std::lround(spec_.sea_level));
+
+    // Chunk-level extremity bounds: whole columns above the terrain/sea are air,
+    // whole columns below the surface are solid stone. The detailed pass only
+    // touches the band that can actually contain surface blocks, water, or caves.
+    const int detail_start = std::clamp(
+        static_cast<int>(std::floor(chunk_min_height)) - 5 - origin_y, 0, kChunkSizeY);
+    const int detail_end = std::clamp(
+        std::max(static_cast<int>(std::ceil(chunk_max_height)) + 1, sea_level + 1) -
+            origin_y,
+        0, kChunkSizeY);
 
     const auto push_block = [&column](BlockId block) {
         if (!column.empty() && column.back().block == block) {
@@ -294,41 +314,34 @@ Chunk WorldGenerator::generate(ChunkCoord coord) const {
             const float tz = static_cast<float>(z % kGridStep) / kGridStep;
 
             const float height = bilerp(height_grid, gx, gz, tx, tz);
-            const float h00 = height_grid[static_cast<std::size_t>(gz) * kHeightGrid + gx];
-            const float h10 = height_grid[static_cast<std::size_t>(gz) * kHeightGrid + gx + 1];
-            const float h01 = height_grid[static_cast<std::size_t>(gz + 1) * kHeightGrid + gx];
-            const float h11 = height_grid[static_cast<std::size_t>(gz + 1) * kHeightGrid + gx + 1];
-            const float min_height = std::min(std::min(h00, h10), std::min(h01, h11));
-            const float max_height = std::max(std::max(h00, h10), std::max(h01, h11));
-
+            const int surface_y = static_cast<int>(std::floor(height));
             const Biome biome = biome_grid[static_cast<std::size_t>(gz) * kHeightGrid + gx];
             const bool underwater = height < static_cast<float>(sea_level);
-            const int surface_y = static_cast<int>(std::floor(height));
-            const int detail_start = std::max(0, static_cast<int>(std::floor(min_height)) - 5);
-            const int detail_end = std::min(kChunkSizeY - 1,
-                                            std::max(static_cast<int>(std::ceil(max_height)) + 1,
-                                                     sea_level + 1));
 
             column.clear();
 
             for (int y = 0; y < detail_start; ++y) {
-                push_block(y == 0 ? blocks::Bedrock : blocks::Stone);
+                const int world_y = origin_y + y;
+                push_block(world_y == 0 ? blocks::Bedrock : blocks::Stone);
             }
 
-            for (int y = detail_start; y <= detail_end; ++y) {
+            for (int y = detail_start; y < detail_end; ++y) {
+                const int world_y = origin_y + y;
                 BlockId block = blocks::Air;
 
-                if (y == 0) {
+                if (world_y < 0 || world_y >= kWorldHeight) {
+                    block = blocks::Air;
+                } else if (world_y == 0) {
                     block = blocks::Bedrock;
-                } else if (y <= surface_y) {
-                    if (y >= surface_y - 3) {
-                        block = (y == surface_y) ? surface_block(biome, underwater)
-                                                 : filler_block(biome, underwater);
+                } else if (world_y <= surface_y) {
+                    if (world_y >= surface_y - 3) {
+                        block = (world_y == surface_y) ? surface_block(biome, underwater)
+                                                       : filler_block(biome, underwater);
                     } else {
                         block = blocks::Stone;
                     }
 
-                    if (y > 2 && y < surface_y - 2) {
+                    if (world_y > 2 && world_y < surface_y - 2) {
                         const int gy = y / kGridStep;
                         const float ty = static_cast<float>(y % kGridStep) / kGridStep;
                         const float cave = trilerp(cave_grid, gx, gy, gz, tx, ty, tz);
@@ -336,24 +349,24 @@ Chunk WorldGenerator::generate(ChunkCoord coord) const {
                             block = blocks::Air;
                         }
                     }
-                } else if (y <= sea_level && underwater) {
+                } else if (world_y <= sea_level && underwater) {
                     block = blocks::Water;
                 }
 
-                if (block == blocks::Air && y <= sea_level && underwater) {
+                if (block == blocks::Air && world_y <= sea_level && underwater) {
                     block = blocks::Water;
                 }
                 push_block(block);
             }
 
-            const BlockId above = (detail_end < sea_level) ? blocks::Water : blocks::Air;
-            for (int y = detail_end + 1; y < kChunkSizeY; ++y) {
+            const BlockId above =
+                (origin_y + detail_end <= sea_level) ? blocks::Water : blocks::Air;
+            for (int y = detail_end; y < kChunkSizeY; ++y) {
                 push_block(above);
             }
 
-            if (column.size() > 256) {
-                // Should be impossible: one run per voxel is the worst case.
-                column.resize(256);
+            if (column.size() > static_cast<std::size_t>(kChunkSizeY)) {
+                column.resize(kChunkSizeY);
             }
 
             runs.insert(runs.end(), column.begin(), column.end());

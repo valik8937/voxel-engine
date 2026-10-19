@@ -364,19 +364,13 @@ void Renderer::update_world(const World& world) {
 
     std::size_t rebuilds = 0;
     for (const auto& [coord, chunk] : by_coord) {
-        const auto neighbours = neighbours_3x3(coord);
-        std::array<std::uint32_t, 9> revisions{};
-        bool ready = true;
+        const auto neighbours = neighbours_3x3x3(coord);
+        std::array<std::uint32_t, 27> revisions{};
         for (std::size_t i = 0; i < neighbours.size(); ++i) {
             const auto it = by_coord.find(neighbours[i]);
-            if (it == by_coord.end() || !it->second) {
-                ready = false;
-                break;
+            if (it != by_coord.end() && it->second) {
+                revisions[i] = it->second->revision();
             }
-            revisions[i] = it->second->revision();
-        }
-        if (!ready) {
-            continue;
         }
 
         GpuMesh& gpu_mesh = meshes_[coord];

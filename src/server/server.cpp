@@ -81,10 +81,15 @@ bool GameServer::start() {
     // Keep a small collision-ready area available immediately. The client will
     // request the rest as its render distance grows.
     const ChunkCoord spawn_chunk = chunk_coord_at(
-        static_cast<std::int64_t>(spawn_x_), static_cast<std::int64_t>(spawn_z_));
-    for (int dz = -1; dz <= 1; ++dz) {
-        for (int dx = -1; dx <= 1; ++dx) {
-            (void)get_or_generate(ChunkCoord{spawn_chunk.x + dx, spawn_chunk.z + dz});
+        static_cast<std::int64_t>(spawn_x_), static_cast<std::int64_t>(spawn_y_),
+        static_cast<std::int64_t>(spawn_z_));
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                (void)get_or_generate(
+                    ChunkCoord{spawn_chunk.x + dx, spawn_chunk.y + dy,
+                               spawn_chunk.z + dz});
+            }
         }
     }
     refine_spawn();
@@ -254,8 +259,8 @@ void GameServer::handle_chunk_request(Player& player, std::span<const std::uint8
     if (pending_chunks_.size() >= 4096) {
         return;
     }
-    pending_chunks_.push_back(PendingChunk{player.peer, ChunkCoord{request.x, request.z},
-                                           request.request_id});
+    pending_chunks_.push_back(PendingChunk{
+        player.peer, ChunkCoord{request.x, request.y, request.z}, request.request_id});
 }
 
 void GameServer::handle_block_edit(Player& player, std::span<const std::uint8_t> payload) {
@@ -271,7 +276,7 @@ void GameServer::handle_block_edit(Player& player, std::span<const std::uint8_t>
         return;
     }
 
-    const auto chunk = get_or_generate(chunk_coord_at(edit.x, edit.z));
+    const auto chunk = get_or_generate(chunk_coord_at(edit.x, edit.y, edit.z));
     if (!chunk) {
         return;
     }
@@ -371,6 +376,7 @@ void GameServer::send_chunk(Player& player, ChunkCoord coord, std::uint32_t requ
 
     ChunkData data;
     data.x = coord.x;
+    data.y = coord.y;
     data.z = coord.z;
     data.revision = chunk->revision();
     data.uncompressed_size = static_cast<std::uint32_t>(writer.size());
@@ -487,13 +493,15 @@ void GameServer::find_spawn() {
 
 void GameServer::refine_spawn() {
     const ChunkCoord spawn_chunk = chunk_coord_at(
-        static_cast<std::int64_t>(spawn_x_), static_cast<std::int64_t>(spawn_z_));
+        static_cast<std::int64_t>(spawn_x_), static_cast<std::int64_t>(spawn_y_),
+        static_cast<std::int64_t>(spawn_z_));
     const auto chunk = world_.get(spawn_chunk);
     if (!chunk) {
         return;
     }
 
     const int sea_level = static_cast<int>(std::lround(spec().sea_level));
+    const int base_y = spawn_chunk.y * kChunkSizeY;
     const int center_x = local_x(static_cast<std::int64_t>(spawn_x_));
     const int center_z = local_z(static_cast<std::int64_t>(spawn_z_));
 
@@ -507,7 +515,9 @@ void GameServer::refine_spawn() {
     for (int lz = kSpawnSlopeRadius; lz < kChunkSizeZ - kSpawnSlopeRadius; ++lz) {
         for (int lx = kSpawnSlopeRadius; lx < kChunkSizeX - kSpawnSlopeRadius; ++lx) {
             const int height = chunk->highest_solid(lx, lz);
-            if (height < sea_level + 1 || height + 4 >= kChunkSizeY) {
+            const int world_height = base_y + height;
+            if (height < 0 || world_height < sea_level + 1 ||
+                height + 4 >= kChunkSizeY) {
                 continue;
             }
 
@@ -551,10 +561,10 @@ void GameServer::refine_spawn() {
     }
     spawn_x_ = static_cast<float>(spawn_chunk.x * kChunkSizeX + best_x) + 0.5f;
     spawn_z_ = static_cast<float>(spawn_chunk.z * kChunkSizeZ + best_z) + 0.5f;
-    spawn_y_ = static_cast<float>(best_height + 1);
+    spawn_y_ = static_cast<float>(base_y + best_height + 1);
 
     VOX_LOG_INFO("Refined spawn to {:.1f},{:.1f},{:.1f} (surface y={})",
-                 spawn_x_, spawn_y_, spawn_z_, best_height);
+                 spawn_x_, spawn_y_, spawn_z_, base_y + best_height);
 }
 
 void GameServer::save_dirty() {

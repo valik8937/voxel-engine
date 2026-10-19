@@ -59,17 +59,17 @@ std::vector<std::shared_ptr<Chunk>> World::dirty_snapshot() const {
     return result;
 }
 
-BlockId World::get_block(std::int64_t x, int y, std::int64_t z) const {
-    const auto chunk = get(chunk_coord_at(x, z));
+BlockId World::get_block(std::int64_t x, std::int64_t y, std::int64_t z) const {
+    const auto chunk = get(chunk_coord_at(x, y, z));
     if (!chunk) {
         return blocks::Air;
     }
     return chunk->get_world(x, y, z);
 }
 
-bool World::set_block(std::int64_t x, int y, std::int64_t z, BlockId block) {
+bool World::set_block(std::int64_t x, std::int64_t y, std::int64_t z, BlockId block) {
     const std::lock_guard lock(mutex_);
-    const auto it = chunks_.find(chunk_coord_at(x, z));
+    const auto it = chunks_.find(chunk_coord_at(x, y, z));
     if (it == chunks_.end()) {
         return false;
     }

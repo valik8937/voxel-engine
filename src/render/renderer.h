@@ -64,7 +64,7 @@ private:
         SDL_GPUBuffer* index_buffer = nullptr;
         std::uint32_t index_count = 0;
         std::uint32_t revision = 0;
-        std::array<std::uint32_t, 9> neighbour_revisions{};
+        std::array<std::uint32_t, 27> neighbour_revisions{};
         bool initialized = false;
     };
 

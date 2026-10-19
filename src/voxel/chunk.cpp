@@ -79,8 +79,8 @@ BlockId Chunk::get(int x, int y, int z) const noexcept {
     return blocks::Air;
 }
 
-BlockId Chunk::get_world(std::int64_t x, int y, std::int64_t z) const noexcept {
-    return get(local_x(x), y, local_z(z));
+BlockId Chunk::get_world(std::int64_t x, std::int64_t y, std::int64_t z) const noexcept {
+    return get(local_x(x), local_y(y), local_z(z));
 }
 
 bool Chunk::set(int x, int y, int z, BlockId block) {
@@ -130,8 +130,8 @@ bool Chunk::set(int x, int y, int z, BlockId block) {
     return true;
 }
 
-bool Chunk::set_world(std::int64_t x, int y, std::int64_t z, BlockId block) {
-    return set(local_x(x), y, local_z(z), block);
+bool Chunk::set_world(std::int64_t x, std::int64_t y, std::int64_t z, BlockId block) {
+    return set(local_x(x), local_y(y), local_z(z), block);
 }
 
 std::size_t Chunk::memory_bytes() const noexcept {
@@ -213,6 +213,7 @@ void Chunk::encode_column(const std::array<BlockId, kChunkSizeY>& column,
 
 void Chunk::serialize(BinaryWriter& writer) const {
     writer.i32(coord_.x);
+    writer.i32(coord_.y);
     writer.i32(coord_.z);
     writer.u32(revision_);
     writer.u32(static_cast<std::uint32_t>(runs_.size()));
@@ -225,6 +226,7 @@ void Chunk::serialize(BinaryWriter& writer) const {
 bool Chunk::deserialize(BinaryReader& reader, Chunk& out) {
     Chunk chunk;
     chunk.coord_.x = reader.i32();
+    chunk.coord_.y = reader.i32();
     chunk.coord_.z = reader.i32();
     chunk.revision_ = reader.u32();
     const std::uint32_t run_count = reader.u32();

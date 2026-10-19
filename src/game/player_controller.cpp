@@ -17,9 +17,6 @@ constexpr float kMaxFallSpeed = 55.0f;
 constexpr float kSubstep = 0.2f;
 
 bool solid_at(const World& world, int x, int y, int z) {
-    if (y < 0 || y >= kChunkSizeY) {
-        return false;
-    }
     return block_is_solid(world.get_block(x, y, z));
 }
 
