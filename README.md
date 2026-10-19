@@ -7,6 +7,8 @@ noise caching, compressed chunk transfer, and occlusion-based color ramping.
 The networking path exists from the first commit. Single-player is an embedded
 authoritative server connected over ENet loopback, not a separate code path.
 
+![Voxel terrain](docs/screenshot.png)
+
 ## Current status
 
 Working:
@@ -89,7 +91,8 @@ Benchmark:
 
 On the development machine (Ryzen 7 4700U, release build): 512 chunks generated
 in 0.128 s, about 1.05 Gvoxels/s, 40 KiB RLE per chunk, 0.93 KiB/chunk after
-Zstandard. The rendered client holds 60 FPS at 1600x900 and radius 6.
+Zstandard. The rendered client holds 60 FPS at 1600x900 with radius 12
+(625 chunks / 529 rendered meshes).
 
 ## Controls
 
