@@ -1,6 +1,7 @@
 #include "net/protocol.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace vox::net {
 
@@ -24,7 +25,7 @@ std::optional<PacketView> parse_packet(std::span<const std::uint8_t> packet) {
     if (!reader.ok() || magic != kProtocolMagic || version != kProtocolVersion) {
         return std::nullopt;
     }
-    if (type < PacketType::Hello || type > PacketType::Pong) {
+    if (type < PacketType::Hello || type > PacketType::PlayerInput) {
         return std::nullopt;
     }
     return PacketView{type, packet.subspan(kHeaderSize)};
@@ -234,6 +235,33 @@ bool decode_pong(std::span<const std::uint8_t> payload, Pong& out) {
     BinaryReader reader(payload);
     out.nonce = reader.u32();
     return reader.ok();
+}
+
+std::vector<std::uint8_t> encode_player_input(const PlayerInput& message) {
+    BinaryWriter payload;
+    payload.u32(message.sequence);
+    payload.f32(message.move_forward);
+    payload.f32(message.move_right);
+    payload.f32(message.yaw);
+    payload.f32(message.pitch);
+    payload.boolean(message.jump);
+    payload.boolean(message.sprint);
+    return make_packet(PacketType::PlayerInput, payload);
+}
+
+bool decode_player_input(std::span<const std::uint8_t> payload, PlayerInput& out) {
+    BinaryReader reader(payload);
+    out.sequence = reader.u32();
+    out.move_forward = reader.f32();
+    out.move_right = reader.f32();
+    out.yaw = reader.f32();
+    out.pitch = reader.f32();
+    out.jump = reader.boolean();
+    out.sprint = reader.boolean();
+    return reader.ok() && std::isfinite(out.move_forward) &&
+           std::isfinite(out.move_right) && std::isfinite(out.yaw) &&
+           std::isfinite(out.pitch) && std::abs(out.move_forward) <= 1.0f &&
+           std::abs(out.move_right) <= 1.0f;
 }
 
 } // namespace vox::net

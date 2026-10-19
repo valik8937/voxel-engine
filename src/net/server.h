@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/zstd.h"
+#include "game/player_controller.h"
 #include "net/protocol.h"
 #include "server/world_store.h"
 #include "voxel/world.h"
@@ -76,7 +77,11 @@ private:
         float z = 0.0f;
         float yaw = 0.0f;
         float pitch = 0.0f;
-        std::uint32_t last_input = 0;
+        Vec3 velocity{};
+        bool on_ground = false;
+        bool has_input = false;
+        PlayerMoveInput last_input{};
+        std::uint32_t last_input_sequence = 0;
     };
 
     struct PendingChunk {
@@ -92,6 +97,8 @@ private:
     void handle_hello(Player& player, std::span<const std::uint8_t> payload);
     void handle_chunk_request(Player& player, std::span<const std::uint8_t> payload);
     void handle_block_edit(Player& player, std::span<const std::uint8_t> payload);
+    void handle_player_input(Player& player, std::span<const std::uint8_t> payload);
+    void step_players(float dt);
 
     void send_welcome(Player& player);
     void send_chunk(Player& player, ChunkCoord coord, std::uint32_t request_id);
@@ -103,6 +110,7 @@ private:
     [[nodiscard]] std::shared_ptr<Chunk> get_or_generate(ChunkCoord coord);
     void process_pending_chunks();
     void find_spawn();
+    void refine_spawn();
     void save_dirty();
 
     ServerConfig config_;

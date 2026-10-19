@@ -99,14 +99,15 @@ struct Mat4 {
     }
 };
 
+// Right-handed perspective with Vulkan/SDL_GPU clip depth in [0, 1].
 inline Mat4 perspective(float fov_y_radians, float aspect, float near_z, float far_z) {
     Mat4 r{};
     const float f = 1.0f / std::tan(fov_y_radians * 0.5f);
     r.m[0] = f / aspect;
     r.m[5] = f;
-    r.m[10] = (far_z + near_z) / (near_z - far_z);
+    r.m[10] = far_z / (near_z - far_z);
     r.m[11] = -1.0f;
-    r.m[14] = (2.0f * far_z * near_z) / (near_z - far_z);
+    r.m[14] = (far_z * near_z) / (near_z - far_z);
     return r;
 }
 

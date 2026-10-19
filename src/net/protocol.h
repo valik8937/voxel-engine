@@ -28,6 +28,7 @@ enum class PacketType : std::uint8_t {
     Disconnect = 8,
     Ping = 9,
     Pong = 10,
+    PlayerInput = 11,
 };
 
 struct PacketView {
@@ -116,6 +117,16 @@ struct Pong {
     std::uint32_t nonce = 0;
 };
 
+struct PlayerInput {
+    std::uint32_t sequence = 0;
+    float move_forward = 0.0f;
+    float move_right = 0.0f;
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    bool jump = false;
+    bool sprint = false;
+};
+
 [[nodiscard]] std::vector<std::uint8_t> encode_hello(const Hello& message);
 [[nodiscard]] bool decode_hello(std::span<const std::uint8_t> payload, Hello& out);
 
@@ -150,5 +161,9 @@ struct Pong {
 
 [[nodiscard]] std::vector<std::uint8_t> encode_pong(const Pong& message);
 [[nodiscard]] bool decode_pong(std::span<const std::uint8_t> payload, Pong& out);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_player_input(const PlayerInput& message);
+[[nodiscard]] bool decode_player_input(std::span<const std::uint8_t> payload,
+                                       PlayerInput& out);
 
 } // namespace vox::net

@@ -2,11 +2,14 @@
 #include "core/hash.h"
 #include "core/job_system.h"
 #include "core/zstd.h"
+#include "game/player_controller.h"
 #include "net/client.h"
 #include "net/protocol.h"
 #include "net/server.h"
+#include "physics/physics_world.h"
 #include "voxel/block.h"
 #include "voxel/chunk.h"
+#include "voxel/raycast.h"
 #include "voxel/world.h"
 #include "worldgen/generator.h"
 
@@ -255,8 +258,8 @@ void test_protocol() {
     {
         Snapshot snapshot;
         snapshot.tick = 77;
-        snapshot.players.push_back(PlayerState{1, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6});
-        snapshot.players.push_back(PlayerState{2, -1.0f, -2.0f, -3.0f, -4.0f, -5.0f, 7});
+        snapshot.players.push_back(vox::net::PlayerState{1, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6});
+        snapshot.players.push_back(vox::net::PlayerState{2, -1.0f, -2.0f, -3.0f, -4.0f, -5.0f, 7});
         const auto packet = encode_snapshot(snapshot);
         const auto view = parse_packet(packet);
         CHECK(view.has_value());
@@ -265,6 +268,27 @@ void test_protocol() {
         CHECK_EQ(decoded.tick, 77u);
         CHECK_EQ(decoded.players.size(), 2u);
         CHECK_EQ(decoded.players[1].player_id, 2u);
+    }
+
+    {
+        vox::net::PlayerInput input;
+        input.sequence = 42;
+        input.move_forward = 1.0f;
+        input.move_right = -1.0f;
+        input.yaw = 0.5f;
+        input.pitch = -0.25f;
+        input.jump = true;
+        input.sprint = false;
+        const auto packet = encode_player_input(input);
+        const auto view = parse_packet(packet);
+        CHECK(view.has_value());
+        CHECK(view->type == PacketType::PlayerInput);
+        vox::net::PlayerInput decoded;
+        CHECK(decode_player_input(view->payload, decoded));
+        CHECK_EQ(decoded.sequence, input.sequence);
+        CHECK_EQ(decoded.move_forward, input.move_forward);
+        CHECK_EQ(decoded.move_right, input.move_right);
+        CHECK_EQ(decoded.jump, input.jump);
     }
 
     {
@@ -368,10 +392,117 @@ void test_integration() {
                 CHECK_EQ(client.world().get_block(world_x, y, world_z), blocks::Air);
             }
         }
+
+        const float start_x = client.welcome()->spawn_x;
+        const float start_z = client.welcome()->spawn_z;
+        std::uint32_t input_sequence = 1;
+        for (int tick = 0; tick < 60; ++tick) {
+            vox::net::PlayerInput input;
+            input.sequence = input_sequence++;
+            input.move_forward = 1.0f;
+            input.yaw = 0.0f;
+            CHECK(client.send_player_input(input));
+            client.poll(0);
+            server.tick(1.0f / 30.0f);
+            client.poll(1);
+            std::this_thread::sleep_for(1ms);
+        }
+        const auto* local = client.local_player();
+        CHECK(local != nullptr);
+        if (local != nullptr) {
+            CHECK(local->last_input > 0);
+            CHECK(std::abs(local->x - start_x) + std::abs(local->z - start_z) > 0.01f);
+        }
     }
 
     client.disconnect();
     server.stop();
+}
+
+void test_raycast() {
+    using namespace vox;
+
+    std::vector<Run> runs;
+    for (int i = 0; i < kChunkColumns; ++i) {
+        runs.push_back(Run{blocks::Stone, 64});
+        runs.push_back(Run{blocks::Air, kChunkSizeY - 64});
+    }
+    World world;
+    world.insert(std::make_shared<Chunk>(
+        Chunk::from_runs(ChunkCoord{0, 0}, 0, std::move(runs))));
+
+    const RaycastHit hit = raycast_voxels(world, {16.5f, 70.0f, 16.5f},
+                                          {0.0f, -1.0f, 0.0f}, 10.0f);
+    CHECK(hit.hit);
+    CHECK_EQ(hit.y, 63);
+    CHECK_EQ(hit.normal_y, 1);
+
+    const RaycastHit miss = raycast_voxels(world, {16.5f, 70.0f, 16.5f},
+                                           {0.0f, 1.0f, 0.0f}, 10.0f);
+    CHECK(!miss.hit);
+}
+
+void test_player_controller() {
+    using namespace vox;
+
+    std::vector<Run> runs;
+    runs.reserve(static_cast<std::size_t>(kChunkColumns) * 2);
+    for (int i = 0; i < kChunkColumns; ++i) {
+        runs.push_back(Run{blocks::Stone, 64});
+        runs.push_back(Run{blocks::Air, kChunkSizeY - 64});
+    }
+    World world;
+    world.insert(std::make_shared<Chunk>(
+        Chunk::from_runs(ChunkCoord{0, 0}, 0, std::move(runs))));
+
+    PlayerMoveState state;
+    state.position = Vec3{16.0f, 70.0f, 16.0f};
+    PlayerMoveInput idle;
+    for (int i = 0; i < 180; ++i) {
+        step_player(world, state, idle, 1.0f / 60.0f);
+    }
+    CHECK(state.on_ground);
+    CHECK(state.position.y > 63.5f);
+    CHECK(state.position.y < 65.0f);
+
+    const float start_z = state.position.z;
+    PlayerMoveInput forward;
+    forward.move_forward = 1.0f;
+    forward.yaw = 0.0f;
+    for (int i = 0; i < 60; ++i) {
+        step_player(world, state, forward, 1.0f / 60.0f);
+    }
+    CHECK(state.position.z < start_z - 2.0f);
+    CHECK(std::abs(state.position.x - 16.0f) < 0.1f);
+}
+
+void test_physics() {
+    vox::PhysicsWorld physics;
+    CHECK(physics.initialize());
+    CHECK(physics.running());
+
+    const float ground[] = {
+        -10.0f, 0.0f, -10.0f,
+        -10.0f, 0.0f, 10.0f,
+        10.0f, 0.0f, 10.0f,
+        10.0f, 0.0f, -10.0f,
+    };
+    const std::uint32_t ground_indices[] = {0, 1, 2, 0, 2, 3};
+    physics.add_static_triangles(vox::ChunkCoord{0, 0}, ground, ground_indices);
+
+    const vox::PhysicsBody box = physics.add_box({0.0f, 8.0f, 0.0f},
+                                                 {0.5f, 0.5f, 0.5f}, true);
+    CHECK(box != vox::kInvalidPhysicsBody);
+    for (int i = 0; i < 180; ++i) {
+        physics.step(1.0f / 60.0f);
+    }
+    const vox::Vec3 position = physics.body_position(box);
+    CHECK(position.y < 8.0f);
+    CHECK(position.y > -0.1f);
+
+    physics.remove_body(box);
+    physics.shutdown();
+    CHECK(!physics.running());
 }
 
 void test_job_system() {
@@ -397,6 +528,9 @@ int main() {
     test_generator();
     test_protocol();
     test_integration();
+    test_raycast();
+    test_player_controller();
+    test_physics();
     test_job_system();
 
     if (g_failures == 0) {

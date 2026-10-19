@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/zstd.h"
 #include "voxel/world.h"
 
 #include <cstddef>
@@ -21,6 +22,8 @@ private:
     [[nodiscard]] std::filesystem::path chunk_path(ChunkCoord coord) const;
 
     std::filesystem::path directory_;
+    ZstdCompressor compressor_{3};
+    ZstdDecompressor decompressor_;
 };
 
 } // namespace vox

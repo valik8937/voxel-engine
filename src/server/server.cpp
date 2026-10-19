@@ -78,6 +78,17 @@ bool GameServer::start() {
     }
     find_spawn();
 
+    // Keep a small collision-ready area available immediately. The client will
+    // request the rest as its render distance grows.
+    const ChunkCoord spawn_chunk = chunk_coord_at(
+        static_cast<std::int64_t>(spawn_x_), static_cast<std::int64_t>(spawn_z_));
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            (void)get_or_generate(ChunkCoord{spawn_chunk.x + dx, spawn_chunk.z + dz});
+        }
+    }
+    refine_spawn();
+
     running_ = true;
     VOX_LOG_INFO("Server listening on port {} (seed {}, spec {:08x}, spawn {:.1f},{:.1f},{:.1f})",
                  port_, config_.seed, generator_.spec_hash(), spawn_x_, spawn_y_, spawn_z_);
@@ -127,6 +138,7 @@ void GameServer::tick(float dt) {
     }
 
     process_pending_chunks();
+    step_players(dt);
 
     snapshot_accumulator_ += dt;
     if (snapshot_accumulator_ >= config_.snapshot_interval) {
@@ -190,6 +202,9 @@ void GameServer::handle_packet(_ENetPeer* peer, _ENetPacket* packet) {
             break;
         case PacketType::BlockEdit:
             handle_block_edit(player, view->payload);
+            break;
+        case PacketType::PlayerInput:
+            handle_player_input(player, view->payload);
             break;
         case PacketType::Ping: {
             Ping ping;
@@ -272,6 +287,53 @@ void GameServer::handle_block_edit(Player& player, std::span<const std::uint8_t>
     send_block_update(update);
 }
 
+void GameServer::handle_player_input(Player& player, std::span<const std::uint8_t> payload) {
+    PlayerInput input;
+    if (!decode_player_input(payload, input)) {
+        return;
+    }
+    if (input.sequence <= player.last_input_sequence) {
+        return;
+    }
+    player.last_input_sequence = input.sequence;
+    player.yaw = input.yaw;
+    player.pitch = std::clamp(input.pitch, -1.55f, 1.55f);
+    player.last_input.move_forward = input.move_forward;
+    player.last_input.move_right = input.move_right;
+    player.last_input.jump = input.jump;
+    player.last_input.sprint = input.sprint;
+    player.last_input.yaw = input.yaw;
+    player.last_input.pitch = input.pitch;
+    player.has_input = true;
+}
+
+void GameServer::step_players(float dt) {
+    for (auto& [peer, player] : players_) {
+        (void)peer;
+        if (!player.authenticated || !player.has_input) {
+            continue;
+        }
+
+        PlayerMoveState state;
+        state.position = Vec3{player.x, player.y, player.z};
+        state.velocity = player.velocity;
+        state.on_ground = player.on_ground;
+
+        step_player(world_, state, player.last_input, dt);
+
+        player.x = state.position.x;
+        player.y = state.position.y;
+        player.z = state.position.z;
+        player.velocity = state.velocity;
+        player.on_ground = state.on_ground;
+
+        // Movement axes are one-shot; gravity still applies next tick.
+        player.last_input.move_forward = 0.0f;
+        player.last_input.move_right = 0.0f;
+        player.last_input.jump = false;
+    }
+}
+
 void GameServer::send_welcome(Player& player) {
     Welcome welcome;
     welcome.player_id = player.id;
@@ -347,7 +409,7 @@ void GameServer::send_snapshot() {
         state.z = player.z;
         state.yaw = player.yaw;
         state.pitch = player.pitch;
-        state.last_input = player.last_input;
+        state.last_input = player.last_input_sequence;
         snapshot.players.push_back(state);
     }
     const auto packet = encode_snapshot(snapshot);
@@ -421,6 +483,78 @@ void GameServer::find_spawn() {
     spawn_x_ = best_x;
     spawn_y_ = best_height + 2.0f;
     spawn_z_ = best_z;
+}
+
+void GameServer::refine_spawn() {
+    const ChunkCoord spawn_chunk = chunk_coord_at(
+        static_cast<std::int64_t>(spawn_x_), static_cast<std::int64_t>(spawn_z_));
+    const auto chunk = world_.get(spawn_chunk);
+    if (!chunk) {
+        return;
+    }
+
+    const int sea_level = static_cast<int>(std::lround(spec().sea_level));
+    const int center_x = local_x(static_cast<std::int64_t>(spawn_x_));
+    const int center_z = local_z(static_cast<std::int64_t>(spawn_z_));
+
+    int best_x = center_x;
+    int best_z = center_z;
+    int best_height = chunk->highest_solid(center_x, center_z);
+    int best_distance = std::numeric_limits<int>::max();
+    int best_slope = std::numeric_limits<int>::max();
+
+    constexpr int kSpawnSlopeRadius = 4;
+    for (int lz = kSpawnSlopeRadius; lz < kChunkSizeZ - kSpawnSlopeRadius; ++lz) {
+        for (int lx = kSpawnSlopeRadius; lx < kChunkSizeX - kSpawnSlopeRadius; ++lx) {
+            const int height = chunk->highest_solid(lx, lz);
+            if (height < sea_level + 1 || height + 4 >= kChunkSizeY) {
+                continue;
+            }
+
+            bool clear = true;
+            for (int dy = 1; dy <= 4; ++dy) {
+                if (chunk->get(lx, height + dy, lz) != blocks::Air) {
+                    clear = false;
+                    break;
+                }
+            }
+            if (!clear) {
+                continue;
+            }
+
+            int slope = 0;
+            for (int dz = -kSpawnSlopeRadius; dz <= kSpawnSlopeRadius; ++dz) {
+                for (int dx = -kSpawnSlopeRadius; dx <= kSpawnSlopeRadius; ++dx) {
+                    const int neighbour = chunk->highest_solid(lx + dx, lz + dz);
+                    if (neighbour < 0) {
+                        slope = 999;
+                        break;
+                    }
+                    slope = std::max(slope, std::abs(neighbour - height));
+                }
+            }
+
+            const int distance = (lx - center_x) * (lx - center_x) +
+                                 (lz - center_z) * (lz - center_z);
+            if (slope < best_slope || (slope == best_slope && distance < best_distance)) {
+                best_slope = slope;
+                best_distance = distance;
+                best_x = lx;
+                best_z = lz;
+                best_height = height;
+            }
+        }
+    }
+
+    if (best_height < 0) {
+        return;
+    }
+    spawn_x_ = static_cast<float>(spawn_chunk.x * kChunkSizeX + best_x) + 0.5f;
+    spawn_z_ = static_cast<float>(spawn_chunk.z * kChunkSizeZ + best_z) + 0.5f;
+    spawn_y_ = static_cast<float>(best_height + 1);
+
+    VOX_LOG_INFO("Refined spawn to {:.1f},{:.1f},{:.1f} (surface y={})",
+                 spawn_x_, spawn_y_, spawn_z_, best_height);
 }
 
 void GameServer::save_dirty() {

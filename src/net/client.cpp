@@ -17,6 +17,7 @@ namespace {
 
 constexpr std::uint8_t kChannelControl = 0;
 constexpr std::uint8_t kChannelEdits = 2;
+constexpr std::uint8_t kChannelInput = 3;
 
 } // namespace
 
@@ -157,12 +158,33 @@ bool GameClient::send_block_edit(std::int32_t x, std::uint16_t y, std::int32_t z
     return true;
 }
 
+bool GameClient::send_player_input(const PlayerInput& input) {
+    if (state_ != State::Connected || peer_ == nullptr) {
+        return false;
+    }
+    const auto packet = encode_player_input(input);
+    send_packet(packet, false, kChannelInput);
+    return true;
+}
+
 std::uint32_t GameClient::player_id() const noexcept {
     return welcome_ ? welcome_->player_id : 0;
 }
 
 std::uint32_t GameClient::server_tick() const noexcept {
     return last_snapshot_ ? last_snapshot_->tick : 0;
+}
+
+const PlayerState* GameClient::local_player() const noexcept {
+    if (!welcome_ || !last_snapshot_) {
+        return nullptr;
+    }
+    for (const PlayerState& player : last_snapshot_->players) {
+        if (player.player_id == welcome_->player_id) {
+            return &player;
+        }
+    }
+    return nullptr;
 }
 
 void GameClient::handle_packet(_ENetPacket* packet) {

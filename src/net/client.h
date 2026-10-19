@@ -53,6 +53,7 @@ public:
     [[nodiscard]] bool request_chunk(ChunkCoord coord);
     [[nodiscard]] bool send_block_edit(std::int32_t x, std::uint16_t y, std::int32_t z,
                                        BlockId block);
+    [[nodiscard]] bool send_player_input(const PlayerInput& input);
 
     [[nodiscard]] State state() const noexcept { return state_; }
     [[nodiscard]] const std::string& last_error() const noexcept { return last_error_; }
@@ -60,6 +61,7 @@ public:
     [[nodiscard]] const std::optional<Snapshot>& last_snapshot() const noexcept {
         return last_snapshot_;
     }
+    [[nodiscard]] const PlayerState* local_player() const noexcept;
     [[nodiscard]] std::uint32_t player_id() const noexcept;
     [[nodiscard]] std::uint32_t server_tick() const noexcept;
     [[nodiscard]] const World& world() const noexcept { return world_; }

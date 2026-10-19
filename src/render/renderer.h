@@ -1,0 +1,86 @@
+#pragma once
+
+#include "render/camera.h"
+#include "render/chunk_mesh.h"
+#include "voxel/world.h"
+
+#include <SDL3/SDL.h>
+
+#include <array>
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+
+namespace vox {
+
+struct RendererConfig {
+    std::string title = "Voxel Engine";
+    int width = 1280;
+    int height = 720;
+    bool vsync = true;
+};
+
+class Renderer {
+public:
+    Renderer() = default;
+    ~Renderer();
+
+    Renderer(const Renderer&) = delete;
+    Renderer& operator=(const Renderer&) = delete;
+
+    [[nodiscard]] bool initialize(const RendererConfig& config);
+    void shutdown();
+
+    // Call before begin_frame(). Uploads/rebuilds a bounded number of chunk
+    // meshes so frame time stays predictable.
+    void update_world(const World& world);
+
+    [[nodiscard]] bool begin_frame();
+    void render(const Camera& camera);
+    void end_frame();
+
+    [[nodiscard]] SDL_Window* window() const noexcept { return window_; }
+    [[nodiscard]] SDL_GPUDevice* device() const noexcept { return device_; }
+    [[nodiscard]] int width() const noexcept { return width_; }
+    [[nodiscard]] int height() const noexcept { return height_; }
+    [[nodiscard]] std::size_t mesh_count() const noexcept { return meshes_.size(); }
+
+private:
+    struct GpuMesh {
+        SDL_GPUBuffer* vertex_buffer = nullptr;
+        SDL_GPUBuffer* index_buffer = nullptr;
+        std::uint32_t index_count = 0;
+        std::uint32_t revision = 0;
+        std::array<std::uint32_t, 9> neighbour_revisions{};
+        bool initialized = false;
+    };
+
+    [[nodiscard]] bool create_depth_texture();
+    [[nodiscard]] bool create_pipelines();
+    [[nodiscard]] SDL_GPUShader* load_shader(const std::string& name,
+                                             SDL_GPUShaderStage stage,
+                                             std::uint32_t uniform_buffers);
+    void rebuild_mesh(const World& world, ChunkCoord coord, GpuMesh& gpu_mesh);
+    void upload_mesh(GpuMesh& gpu_mesh, const ChunkMesh& mesh);
+    void release_mesh(GpuMesh& gpu_mesh);
+    void release_all_meshes();
+
+    SDL_Window* window_ = nullptr;
+    SDL_GPUDevice* device_ = nullptr;
+    SDL_GPUGraphicsPipeline* chunk_pipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* sky_pipeline_ = nullptr;
+    SDL_GPUTexture* depth_texture_ = nullptr;
+    SDL_GPUTextureFormat depth_format_ = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    SDL_GPUTextureFormat swapchain_format_ = SDL_GPU_TEXTUREFORMAT_INVALID;
+
+    SDL_GPUCommandBuffer* command_buffer_ = nullptr;
+    SDL_GPUTexture* swapchain_texture_ = nullptr;
+    int width_ = 0;
+    int height_ = 0;
+    bool vsync_ = true;
+
+    std::unordered_map<ChunkCoord, GpuMesh, ChunkCoordHash> meshes_;
+    std::size_t max_mesh_rebuilds_per_frame_ = 4;
+};
+
+} // namespace vox

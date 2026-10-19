@@ -86,8 +86,7 @@ bool WorldStore::load(World& world) {
             continue;
         }
 
-        ZstdDecompressor decompressor;
-        auto raw = decompressor.decompress(compressed, uncompressed_size);
+        auto raw = decompressor_.decompress(compressed, uncompressed_size);
         if (!raw || crc32(*raw) != checksum) {
             ++failed;
             continue;
@@ -127,8 +126,7 @@ bool WorldStore::save_chunk(const Chunk& chunk) {
     BinaryWriter chunk_writer;
     chunk.serialize(chunk_writer);
 
-    ZstdCompressor compressor(3);
-    auto compressed = compressor.compress(chunk_writer.data());
+    auto compressed = compressor_.compress(chunk_writer.data());
     if (!compressed) {
         VOX_LOG_ERROR("Zstd compression failed for chunk {},{}", chunk.coord().x, chunk.coord().z);
         return false;
