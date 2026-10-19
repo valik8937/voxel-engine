@@ -74,19 +74,12 @@ bool GameServer::start() {
     }
     port_ = host_->address.port;
 
-    if (!physics_.initialize()) {
-        VOX_LOG_ERROR("Jolt initialization failed");
-        return false;
-    }
-    collision_streamer_ = std::make_unique<CollisionStreamer>(world_, physics_);
-
     if (config_.load_world) {
         (void)store_.load(world_);
     }
     find_spawn();
 
-    // Keep a small collision-ready area available immediately. The client will
-    // request the rest as its render distance grows.
+    // Pre-generate a small spawn area so the first client request is fast.
     const ChunkCoord spawn_chunk = chunk_coord_at(
         static_cast<std::int64_t>(spawn_x_), static_cast<std::int64_t>(spawn_y_),
         static_cast<std::int64_t>(spawn_z_));
@@ -100,11 +93,6 @@ bool GameServer::start() {
         }
     }
     refine_spawn();
-    collision_streamer_->update(
-        chunk_coord_at(static_cast<std::int64_t>(spawn_x_),
-                       static_cast<std::int64_t>(spawn_y_),
-                       static_cast<std::int64_t>(spawn_z_)),
-        1, 1, 1000);
 
     running_ = true;
     VOX_LOG_INFO("Server listening on port {} (seed {}, spec {:08x}, spawn {:.1f},{:.1f},{:.1f})",
@@ -125,8 +113,6 @@ void GameServer::stop() {
     }
     players_.clear();
     pending_chunks_.clear();
-    collision_streamer_.reset();
-    physics_.shutdown();
     running_ = false;
     VOX_LOG_INFO("Server stopped");
 }
@@ -157,15 +143,6 @@ void GameServer::tick(float dt) {
     }
 
     process_pending_chunks();
-
-    collision_accumulator_ += dt;
-    if (collision_accumulator_ >= 0.5f) {
-        collision_accumulator_ = 0.0f;
-        update_collision_streaming();
-    }
-
-    physics_.step(dt);
-    step_players(dt);
 
     snapshot_accumulator_ += dt;
     if (snapshot_accumulator_ >= config_.snapshot_interval) {
@@ -198,9 +175,6 @@ void GameServer::handle_event_disconnect(_ENetPeer* peer) {
     const auto it = players_.find(peer);
     if (it != players_.end()) {
         VOX_LOG_INFO("Player {} disconnected", it->second.name.empty() ? "unknown" : it->second.name);
-        if (it->second.character != kInvalidPhysicsCharacter) {
-            physics_.remove_character(it->second.character);
-        }
         players_.erase(it);
     }
 }
@@ -233,8 +207,8 @@ void GameServer::handle_packet(_ENetPeer* peer, _ENetPacket* packet) {
         case PacketType::BlockEdit:
             handle_block_edit(player, view->payload);
             break;
-        case PacketType::PlayerInput:
-            handle_player_input(player, view->payload);
+        case PacketType::PlayerMove:
+            handle_player_move(player, view->payload);
             break;
         case PacketType::Ping: {
             Ping ping;
@@ -272,15 +246,8 @@ void GameServer::handle_hello(Player& player, std::span<const std::uint8_t> payl
     player.x = spawn_x_;
     player.y = spawn_y_;
     player.z = spawn_z_;
-    player.velocity = {};
-
-    const ChunkCoord spawn_chunk = chunk_coord_at(
-        static_cast<std::int64_t>(spawn_x_), static_cast<std::int64_t>(spawn_y_),
-        static_cast<std::int64_t>(spawn_z_));
-    collision_streamer_->update(spawn_chunk, 1, 1, 1000);
-    player.character = physics_.create_character({spawn_x_, spawn_y_, spawn_z_});
-    VOX_LOG_INFO("Player {} authenticated as '{}' (character {})", player.id,
-                 player.name, player.character);
+    player.last_move_time = std::chrono::steady_clock::now();
+    VOX_LOG_INFO("Player {} authenticated as '{}'", player.id, player.name);
     send_welcome(player);
 }
 
@@ -314,13 +281,6 @@ void GameServer::handle_block_edit(Player& player, std::span<const std::uint8_t>
         return;
     }
     chunk->set_world(edit.x, edit.y, edit.z, edit.block);
-    refresh_collision(chunk->coord());
-    if (collision_streamer_) {
-        const ChunkCoord player_chunk = chunk_coord_at(
-            static_cast<std::int64_t>(player.x), static_cast<std::int64_t>(player.y),
-            static_cast<std::int64_t>(player.z));
-        (void)collision_streamer_->update(player_chunk, 2, 1, 1000);
-    }
     ++stats_.edits_applied;
 
     BlockUpdate update;
@@ -332,107 +292,66 @@ void GameServer::handle_block_edit(Player& player, std::span<const std::uint8_t>
     send_block_update(update);
 }
 
-void GameServer::handle_player_input(Player& player, std::span<const std::uint8_t> payload) {
-    PlayerInput input;
-    if (!decode_player_input(payload, input)) {
+void GameServer::handle_player_move(Player& player, std::span<const std::uint8_t> payload) {
+    PlayerMove move;
+    if (!decode_player_move(payload, move)) {
+        send_move_reject(player, 0, 3);
         return;
     }
-    if (input.sequence <= player.last_input_sequence) {
+    if (move.sequence <= player.last_move_sequence) {
         return;
     }
-    player.last_input_sequence = input.sequence;
-    player.yaw = input.yaw;
-    player.pitch = std::clamp(input.pitch, -1.55f, 1.55f);
-    player.last_input.move_forward = input.move_forward;
-    player.last_input.move_right = input.move_right;
-    player.last_input.jump = input.jump;
-    player.last_input.sprint = input.sprint;
-    player.last_input.yaw = input.yaw;
-    player.last_input.pitch = input.pitch;
-    player.has_input = true;
+
+    if (!std::isfinite(move.y) || move.y < -64.0f || move.y > 4096.0f) {
+        send_move_reject(player, move.sequence, 3);
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed =
+        std::chrono::duration<double>(now - player.last_move_time).count();
+    const float max_distance =
+        2.0f + 12.0f * std::clamp(static_cast<float>(elapsed), 1.0f / 30.0f, 1.0f);
+
+    const float dx = move.x - player.x;
+    const float dy = move.y - player.y;
+    const float dz = move.z - player.z;
+    const bool too_far =
+        !move.teleport && (dx * dx + dy * dy + dz * dz) > max_distance * max_distance;
+
+    bool inside_block = false;
+    if (!move.teleport) {
+        const int block_x = static_cast<int>(std::floor(move.x));
+        const int block_y = static_cast<int>(std::floor(move.y + 0.9f));
+        const int block_z = static_cast<int>(std::floor(move.z));
+        inside_block = block_is_solid(world_.get_block(block_x, block_y, block_z));
+    }
+
+    if (too_far || inside_block) {
+        send_move_reject(player, move.sequence, too_far ? 1 : 2);
+        return;
+    }
+
+    player.x = move.x;
+    player.y = move.y;
+    player.z = move.z;
+    player.yaw = move.yaw;
+    player.pitch = std::clamp(move.pitch, -1.55f, 1.55f);
+    player.on_ground = move.on_ground;
+    player.last_move_sequence = move.sequence;
+    player.last_move_time = now;
 }
 
-void GameServer::step_players(float dt) {
-    constexpr Vec3 kGravity{0.0f, -24.0f, 0.0f};
-
-    for (auto& [peer, player] : players_) {
-        (void)peer;
-        if (!player.authenticated || player.character == kInvalidPhysicsCharacter) {
-            continue;
-        }
-        if (collision_streamer_) {
-            const ChunkCoord chunk = chunk_coord_at(
-                static_cast<std::int64_t>(player.x),
-                static_cast<std::int64_t>(player.y),
-                static_cast<std::int64_t>(player.z));
-            if (!collision_streamer_->has_chunk(chunk)) {
-                continue;
-            }
-        }
-
-        const Vec3 wish = player_wish_velocity(player.last_input);
-        physics_.step_character(player.character, wish, player.last_input.jump,
-                                kGravity, dt);
-
-        Vec3 position = physics_.character_position(player.character);
-        if (position.y < -16.0f) {
-            physics_.set_character_position(player.character,
-                                            {spawn_x_, spawn_y_, spawn_z_});
-            position = {spawn_x_, spawn_y_, spawn_z_};
-        }
-        player.x = position.x;
-        player.y = position.y;
-        player.z = position.z;
-        player.velocity = physics_.character_velocity(player.character);
-        player.on_ground = physics_.character_on_ground(player.character);
-
-        // Movement axes and jump are one-shot; gravity still applies next tick.
-        player.last_input.move_forward = 0.0f;
-        player.last_input.move_right = 0.0f;
-        player.last_input.jump = false;
-    }
-}
-
-void GameServer::update_collision_streaming() {
-    if (!collision_streamer_) {
-        return;
-    }
-
-    std::vector<ChunkCoord> centers;
-    centers.reserve(players_.size());
-    for (const auto& [peer, player] : players_) {
-        (void)peer;
-        if (!player.authenticated) {
-            continue;
-        }
-        centers.push_back(chunk_coord_at(
-            static_cast<std::int64_t>(player.x),
-            static_cast<std::int64_t>(player.y),
-            static_cast<std::int64_t>(player.z)));
-    }
-
-    if (centers.empty()) {
-        collision_streamer_->clear();
-        return;
-    }
-    (void)collision_streamer_->update(centers, 2, 1, 8);
-}
-
-void GameServer::refresh_collision(ChunkCoord coord) {
-    if (!collision_streamer_) {
-        return;
-    }
-    collision_streamer_->invalidate(coord);
-    for (int dy = -1; dy <= 1; ++dy) {
-        for (int dz = -1; dz <= 1; ++dz) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                const ChunkCoord neighbour{coord.x + dx, coord.y + dy, coord.z + dz};
-                if (world_.get(neighbour)) {
-                    collision_streamer_->invalidate(neighbour);
-                }
-            }
-        }
-    }
+void GameServer::send_move_reject(Player& player, std::uint32_t sequence,
+                                  std::uint8_t reason) {
+    MoveReject reject;
+    reject.sequence = sequence;
+    reject.x = player.x;
+    reject.y = player.y;
+    reject.z = player.z;
+    reject.reason = reason;
+    const auto packet = encode_move_reject(reject);
+    send_packet(player.peer, packet, true, kChannelControl);
 }
 
 void GameServer::send_welcome(Player& player) {
@@ -511,7 +430,7 @@ void GameServer::send_snapshot() {
         state.z = player.z;
         state.yaw = player.yaw;
         state.pitch = player.pitch;
-        state.last_input = player.last_input_sequence;
+        state.last_move_sequence = player.last_move_sequence;
         snapshot.players.push_back(state);
     }
     const auto packet = encode_snapshot(snapshot);

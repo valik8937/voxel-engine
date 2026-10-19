@@ -301,24 +301,46 @@ void test_protocol() {
     }
 
     {
-        vox::net::PlayerInput input;
-        input.sequence = 42;
-        input.move_forward = 1.0f;
-        input.move_right = -1.0f;
-        input.yaw = 0.5f;
-        input.pitch = -0.25f;
-        input.jump = true;
-        input.sprint = false;
-        const auto packet = encode_player_input(input);
+        vox::net::PlayerMove move;
+        move.sequence = 42;
+        move.x = 1.5f;
+        move.y = 71.0f;
+        move.z = -3.25f;
+        move.velocity_x = 2.0f;
+        move.velocity_y = -1.0f;
+        move.velocity_z = -4.0f;
+        move.yaw = 0.5f;
+        move.pitch = -0.25f;
+        move.on_ground = true;
+        move.teleport = false;
+        const auto packet = encode_player_move(move);
         const auto view = parse_packet(packet);
         CHECK(view.has_value());
-        CHECK(view->type == PacketType::PlayerInput);
-        vox::net::PlayerInput decoded;
-        CHECK(decode_player_input(view->payload, decoded));
-        CHECK_EQ(decoded.sequence, input.sequence);
-        CHECK_EQ(decoded.move_forward, input.move_forward);
-        CHECK_EQ(decoded.move_right, input.move_right);
-        CHECK_EQ(decoded.jump, input.jump);
+        CHECK(view->type == PacketType::PlayerMove);
+        vox::net::PlayerMove decoded;
+        CHECK(decode_player_move(view->payload, decoded));
+        CHECK_EQ(decoded.sequence, move.sequence);
+        CHECK_EQ(decoded.x, move.x);
+        CHECK_EQ(decoded.y, move.y);
+        CHECK_EQ(decoded.z, move.z);
+        CHECK_EQ(decoded.on_ground, move.on_ground);
+    }
+
+    {
+        vox::net::MoveReject reject;
+        reject.sequence = 7;
+        reject.x = 10.0f;
+        reject.y = 20.0f;
+        reject.z = 30.0f;
+        reject.reason = 1;
+        const auto packet = encode_move_reject(reject);
+        const auto view = parse_packet(packet);
+        CHECK(view.has_value());
+        CHECK(view->type == PacketType::MoveReject);
+        vox::net::MoveReject decoded;
+        CHECK(decode_move_reject(view->payload, decoded));
+        CHECK_EQ(decoded.sequence, reject.sequence);
+        CHECK_EQ(decoded.reason, reject.reason);
     }
 
     {
@@ -425,15 +447,17 @@ void test_integration() {
             }
         }
 
-        const float start_x = client.welcome()->spawn_x;
         const float start_z = client.welcome()->spawn_z;
-        std::uint32_t input_sequence = 1;
-        for (int tick = 0; tick < 60; ++tick) {
-            vox::net::PlayerInput input;
-            input.sequence = input_sequence++;
-            input.move_forward = 1.0f;
-            input.yaw = 0.0f;
-            CHECK(client.send_player_input(input));
+        std::uint32_t move_sequence = 1;
+        for (int tick = 0; tick < 30; ++tick) {
+            vox::net::PlayerMove move;
+            move.sequence = move_sequence++;
+            move.x = client.welcome()->spawn_x;
+            move.y = client.welcome()->spawn_y;
+            move.z = start_z - 0.1f * static_cast<float>(tick + 1);
+            move.yaw = 0.0f;
+            move.on_ground = true;
+            CHECK(client.send_player_move(move));
             client.poll(0);
             server.tick(1.0f / 30.0f);
             client.poll(1);
@@ -442,8 +466,8 @@ void test_integration() {
         const auto* local = client.local_player();
         CHECK(local != nullptr);
         if (local != nullptr) {
-            CHECK(local->last_input > 0);
-            CHECK(std::abs(local->x - start_x) + std::abs(local->z - start_z) > 0.01f);
+            CHECK(local->last_move_sequence > 0);
+            CHECK(local->z < start_z - 2.0f);
         }
     }
 
@@ -542,26 +566,27 @@ void test_networked_character_jump() {
         local_input.jump = (i == 0);
         const Vec3 wish = player_wish_velocity(local_input);
 
-        net::PlayerInput network_input;
-        network_input.sequence = sequence++;
-        network_input.jump = local_input.jump;
-        CHECK(client.send_player_input(network_input));
-
-        client.poll(0);
-        server.tick(1.0f / 30.0f);
-        client.poll(1);
-
         physics.step(1.0f / 30.0f);
         physics.step_character(character, wish, local_input.jump, gravity,
                                1.0f / 30.0f);
 
-        if (const net::PlayerState* self = client.local_player()) {
-            const Vec3 server_position{self->x, self->y, self->z};
-            const Vec3 local_position = physics.character_position(character);
-            if (length(local_position - server_position) > 3.0f) {
-                physics.set_character_position(character, server_position);
-            }
-        }
+        const Vec3 position = physics.character_position(character);
+        const Vec3 velocity = physics.character_velocity(character);
+        net::PlayerMove move;
+        move.sequence = sequence++;
+        move.x = position.x;
+        move.y = position.y;
+        move.z = position.z;
+        move.velocity_x = velocity.x;
+        move.velocity_y = velocity.y;
+        move.velocity_z = velocity.z;
+        move.yaw = 0.0f;
+        move.on_ground = physics.character_on_ground(character);
+        CHECK(client.send_player_move(move));
+
+        client.poll(0);
+        server.tick(1.0f / 30.0f);
+        client.poll(1);
         std::this_thread::sleep_for(1ms);
     }
 

@@ -109,7 +109,6 @@ add_library(vox_physics STATIC
     src/game/collision_streamer.cpp
 )
 target_link_libraries(vox_physics PUBLIC vox_core Jolt)
-target_link_libraries(vox_server_lib PUBLIC vox_physics)
 
 # ---- Audio -----------------------------------------------------------------
 file(GLOB_RECURSE VOX_AUDIO_SOURCES CONFIGURE_DEPENDS src/audio/*.cpp)

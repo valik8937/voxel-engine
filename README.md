@@ -26,8 +26,9 @@ Working:
   executable.
 - SDL_GPU/Vulkan renderer with chunk meshing, per-vertex ambient occlusion,
   color ramps, sky gradient, fog and a HUD crosshair.
-- First-person player on Jolt `CharacterVirtual`, with chunk collision
-  streaming and client-side prediction/reconciliation.
+- Client-authoritative first-person movement on Jolt `CharacterVirtual`, with
+  chunk collision streaming. The server validates speed/teleport distance and
+  rejects movement into solid blocks.
 - Safe spawn search, collision-readiness gating and a fall-out respawn guard.
 - Block breaking/placing with server-side reach validation.
 - Remote player boxes from server snapshots.
@@ -132,13 +133,22 @@ benchmarks     chunk generation / memory benchmarks
 
 ## Networking model
 
-- Server is authoritative. Clients receive compressed RLE chunks instead of
-  generating terrain locally.
+- World state is server-authoritative. Clients receive compressed RLE chunks
+  instead of generating terrain locally.
 - Chunks are serialized, CRC32-checked, compressed with Zstandard and sent over
   reliable ENet channels.
-- Player input is unreliable and sequenced; snapshots are unreliable and
-  include the last processed input sequence.
+- Player movement is client-authoritative, like Minecraft/Valheim/No Man's Sky:
+  the client simulates Jolt `CharacterVirtual` locally and sends sequenced
+  `PlayerMove` samples over an unreliable channel. The server checks finite
+  values, maximum displacement (with a teleport flag for respawns) and rejects
+  positions inside solid blocks with `MoveReject`.
+- Snapshots are unreliable and broadcast the accepted player positions and
+  last accepted move sequence.
 - Block edits are validated for reach and block ID, applied on the server, then
   broadcast as `BlockUpdate`.
 - Only modified chunks are persisted; unmodified terrain is deterministic from
   the seed and world spec.
+
+Client-authoritative movement is inherently cheat-prone; the validation is a
+sanity limit, not full anti-cheat. Server-side movement simulation can be added
+as an optional authoritative mode later.

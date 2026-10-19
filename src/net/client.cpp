@@ -159,11 +159,11 @@ bool GameClient::send_block_edit(std::int32_t x, std::uint16_t y, std::int32_t z
     return true;
 }
 
-bool GameClient::send_player_input(const PlayerInput& input) {
+bool GameClient::send_player_move(const PlayerMove& move) {
     if (state_ != State::Connected || peer_ == nullptr) {
         return false;
     }
-    const auto packet = encode_player_input(input);
+    const auto packet = encode_player_move(move);
     send_packet(packet, false, kChannelInput);
     return true;
 }
@@ -276,6 +276,13 @@ void GameClient::handle_packet(_ENetPacket* packet) {
             if (decode_ping(view->payload, ping)) {
                 const auto pong = encode_pong(Pong{ping.nonce});
                 send_packet(pong, false, kChannelControl);
+            }
+            break;
+        }
+        case PacketType::MoveReject: {
+            MoveReject reject;
+            if (decode_move_reject(view->payload, reject)) {
+                last_move_reject_ = reject;
             }
             break;
         }

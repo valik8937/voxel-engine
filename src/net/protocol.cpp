@@ -25,7 +25,7 @@ std::optional<PacketView> parse_packet(std::span<const std::uint8_t> packet) {
     if (!reader.ok() || magic != kProtocolMagic || version != kProtocolVersion) {
         return std::nullopt;
     }
-    if (type < PacketType::Hello || type > PacketType::PlayerInput) {
+    if (type < PacketType::Hello || type > PacketType::MoveReject) {
         return std::nullopt;
     }
     return PacketView{type, packet.subspan(kHeaderSize)};
@@ -174,7 +174,7 @@ std::vector<std::uint8_t> encode_snapshot(const Snapshot& message) {
         payload.f32(player.z);
         payload.f32(player.yaw);
         payload.f32(player.pitch);
-        payload.u32(player.last_input);
+        payload.u32(player.last_move_sequence);
     }
     return make_packet(PacketType::Snapshot, payload);
 }
@@ -196,7 +196,7 @@ bool decode_snapshot(std::span<const std::uint8_t> payload, Snapshot& out) {
         player.z = reader.f32();
         player.yaw = reader.f32();
         player.pitch = reader.f32();
-        player.last_input = reader.u32();
+        player.last_move_sequence = reader.u32();
         if (!reader.ok()) {
             return false;
         }
@@ -241,31 +241,71 @@ bool decode_pong(std::span<const std::uint8_t> payload, Pong& out) {
     return reader.ok();
 }
 
-std::vector<std::uint8_t> encode_player_input(const PlayerInput& message) {
+std::vector<std::uint8_t> encode_player_move(const PlayerMove& message) {
     BinaryWriter payload;
     payload.u32(message.sequence);
-    payload.f32(message.move_forward);
-    payload.f32(message.move_right);
+    payload.f32(message.x);
+    payload.f32(message.y);
+    payload.f32(message.z);
+    payload.f32(message.velocity_x);
+    payload.f32(message.velocity_y);
+    payload.f32(message.velocity_z);
     payload.f32(message.yaw);
     payload.f32(message.pitch);
-    payload.boolean(message.jump);
-    payload.boolean(message.sprint);
-    return make_packet(PacketType::PlayerInput, payload);
+    payload.boolean(message.on_ground);
+    payload.boolean(message.teleport);
+    return make_packet(PacketType::PlayerMove, payload);
 }
 
-bool decode_player_input(std::span<const std::uint8_t> payload, PlayerInput& out) {
+bool decode_player_move(std::span<const std::uint8_t> payload, PlayerMove& out) {
     BinaryReader reader(payload);
     out.sequence = reader.u32();
-    out.move_forward = reader.f32();
-    out.move_right = reader.f32();
+    out.x = reader.f32();
+    out.y = reader.f32();
+    out.z = reader.f32();
+    out.velocity_x = reader.f32();
+    out.velocity_y = reader.f32();
+    out.velocity_z = reader.f32();
     out.yaw = reader.f32();
     out.pitch = reader.f32();
-    out.jump = reader.boolean();
-    out.sprint = reader.boolean();
-    return reader.ok() && std::isfinite(out.move_forward) &&
-           std::isfinite(out.move_right) && std::isfinite(out.yaw) &&
-           std::isfinite(out.pitch) && std::abs(out.move_forward) <= 1.0f &&
-           std::abs(out.move_right) <= 1.0f;
+    out.on_ground = reader.boolean();
+    out.teleport = reader.boolean();
+    if (!reader.ok()) {
+        return false;
+    }
+    const auto finite = [](float value) { return std::isfinite(value); };
+    const auto in_range = [](float value, float limit) {
+        return value >= -limit && value <= limit;
+    };
+    return finite(out.x) && finite(out.y) && finite(out.z) &&
+           finite(out.velocity_x) && finite(out.velocity_y) &&
+           finite(out.velocity_z) && finite(out.yaw) && finite(out.pitch) &&
+           in_range(out.x, 1.0e7f) && in_range(out.y, 1.0e7f) &&
+           in_range(out.z, 1.0e7f) &&
+           in_range(out.velocity_x, 1.0e4f) &&
+           in_range(out.velocity_y, 1.0e4f) &&
+           in_range(out.velocity_z, 1.0e4f);
+}
+
+std::vector<std::uint8_t> encode_move_reject(const MoveReject& message) {
+    BinaryWriter payload;
+    payload.u32(message.sequence);
+    payload.f32(message.x);
+    payload.f32(message.y);
+    payload.f32(message.z);
+    payload.u8(message.reason);
+    return make_packet(PacketType::MoveReject, payload);
+}
+
+bool decode_move_reject(std::span<const std::uint8_t> payload, MoveReject& out) {
+    BinaryReader reader(payload);
+    out.sequence = reader.u32();
+    out.x = reader.f32();
+    out.y = reader.f32();
+    out.z = reader.f32();
+    out.reason = reader.u8();
+    return reader.ok() && std::isfinite(out.x) && std::isfinite(out.y) &&
+           std::isfinite(out.z);
 }
 
 } // namespace vox::net

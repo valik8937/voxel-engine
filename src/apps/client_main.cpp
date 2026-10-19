@@ -277,6 +277,8 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
     bool running = true;
     bool mouse_captured = false;
     std::uint32_t input_sequence = 0;
+    std::uint32_t last_reject_sequence = 0;
+    bool teleport_next_move = false;
     float input_accumulator = 0.0f;
     float collision_accumulator = 0.0f;
     double last_time = now_seconds();
@@ -384,6 +386,7 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                 }
             }
             chunks_requested = true;
+            teleport_next_move = false;
             if (options.demo_ship) {
                 demo_ship = renderer.create_box_object(
                     {1.5f, 0.5f, 2.5f},
@@ -539,25 +542,37 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                                            vox::player_wish_velocity(input),
                                            input.jump, kGravity, kInputStep);
 
-                    vox::net::PlayerInput network_input;
-                    network_input.sequence = ++input_sequence;
-                    network_input.move_forward = input.move_forward;
-                    network_input.move_right = input.move_right;
-                    network_input.yaw = input.yaw;
-                    network_input.pitch = input.pitch;
-                    network_input.jump = input.jump;
-                    network_input.sprint = input.sprint;
-                    (void)client.send_player_input(network_input);
+                    const vox::Vec3 position =
+                        physics.character_position(local_character);
+                    const vox::Vec3 velocity =
+                        physics.character_velocity(local_character);
+
+                    vox::net::PlayerMove move;
+                    move.sequence = ++input_sequence;
+                    move.x = position.x;
+                    move.y = position.y;
+                    move.z = position.z;
+                    move.velocity_x = velocity.x;
+                    move.velocity_y = velocity.y;
+                    move.velocity_z = velocity.z;
+                    move.yaw = camera.yaw;
+                    move.pitch = camera.pitch;
+                    move.on_ground = physics.character_on_ground(local_character);
+                    move.teleport = teleport_next_move;
+                    if (client.send_player_move(move)) {
+                        teleport_next_move = false;
+                    }
                 }
 
-                if (const vox::net::PlayerState* server_self = client.local_player()) {
-                    const vox::Vec3 server_position{server_self->x, server_self->y,
-                                                    server_self->z};
-                    const vox::Vec3 local_position =
-                        physics.character_position(local_character);
-                    if (vox::length(local_position - server_position) > 3.0f) {
-                        physics.set_character_position(local_character, server_position);
+                if (const auto& reject = client.last_move_reject()) {
+                    if (reject->sequence >= last_reject_sequence) {
+                        last_reject_sequence = reject->sequence;
+                        physics.set_character_position(
+                            local_character, {reject->x, reject->y, reject->z});
+                        VOX_LOG_WARN("Move rejected (reason {}), snapped to {:.1f},{:.1f},{:.1f}",
+                                     reject->reason, reject->x, reject->y, reject->z);
                     }
+                    client.clear_move_reject();
                 }
 
                 vox::Vec3 character_position =
@@ -568,6 +583,7 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                                             client.welcome()->spawn_z};
                     physics.set_character_position(local_character, respawn);
                     character_position = respawn;
+                    teleport_next_move = true;
                 }
                 camera.position = character_position +
                                   vox::Vec3{0.0f, vox::kPlayerEyeHeight, 0.0f};

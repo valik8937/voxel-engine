@@ -11,7 +11,7 @@
 namespace vox::net {
 
 inline constexpr std::uint32_t kProtocolMagic = 0x31584f56u; // "VOX1"
-inline constexpr std::uint16_t kProtocolVersion = 1;
+inline constexpr std::uint16_t kProtocolVersion = 2;
 inline constexpr std::size_t kHeaderSize = 7;
 inline constexpr std::size_t kMaxPacketSize = 8u * 1024u * 1024u;
 inline constexpr std::size_t kMaxChunkCompressedSize = 4u * 1024u * 1024u;
@@ -28,7 +28,8 @@ enum class PacketType : std::uint8_t {
     Disconnect = 8,
     Ping = 9,
     Pong = 10,
-    PlayerInput = 11,
+    PlayerMove = 11,
+    MoveReject = 12,
 };
 
 struct PacketView {
@@ -54,7 +55,7 @@ struct Welcome {
     float spawn_y = 64.0f;
     float spawn_z = 0.0f;
     std::uint16_t chunk_size_x = 32;
-    std::uint16_t chunk_size_y = 256;
+    std::uint16_t chunk_size_y = 32;
     std::uint16_t chunk_size_z = 32;
 };
 
@@ -99,7 +100,7 @@ struct PlayerState {
     float z = 0.0f;
     float yaw = 0.0f;
     float pitch = 0.0f;
-    std::uint32_t last_input = 0;
+    std::uint32_t last_move_sequence = 0;
 };
 
 struct Snapshot {
@@ -119,14 +120,28 @@ struct Pong {
     std::uint32_t nonce = 0;
 };
 
-struct PlayerInput {
+// Client-authoritative movement sample. The server accepts it after sanity
+// checks and broadcasts it to other players.
+struct PlayerMove {
     std::uint32_t sequence = 0;
-    float move_forward = 0.0f;
-    float move_right = 0.0f;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float velocity_x = 0.0f;
+    float velocity_y = 0.0f;
+    float velocity_z = 0.0f;
     float yaw = 0.0f;
     float pitch = 0.0f;
-    bool jump = false;
-    bool sprint = false;
+    bool on_ground = false;
+    bool teleport = false;
+};
+
+struct MoveReject {
+    std::uint32_t sequence = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    std::uint8_t reason = 0;
 };
 
 [[nodiscard]] std::vector<std::uint8_t> encode_hello(const Hello& message);
@@ -164,8 +179,12 @@ struct PlayerInput {
 [[nodiscard]] std::vector<std::uint8_t> encode_pong(const Pong& message);
 [[nodiscard]] bool decode_pong(std::span<const std::uint8_t> payload, Pong& out);
 
-[[nodiscard]] std::vector<std::uint8_t> encode_player_input(const PlayerInput& message);
-[[nodiscard]] bool decode_player_input(std::span<const std::uint8_t> payload,
-                                       PlayerInput& out);
+[[nodiscard]] std::vector<std::uint8_t> encode_player_move(const PlayerMove& message);
+[[nodiscard]] bool decode_player_move(std::span<const std::uint8_t> payload,
+                                      PlayerMove& out);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_move_reject(const MoveReject& message);
+[[nodiscard]] bool decode_move_reject(std::span<const std::uint8_t> payload,
+                                      MoveReject& out);
 
 } // namespace vox::net
