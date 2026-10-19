@@ -1,8 +1,10 @@
 #pragma once
 
 #include "core/zstd.h"
-#include "game/player_controller.h"
+#include "game/collision_streamer.h"
+#include "game/player_input.h"
 #include "net/protocol.h"
+#include "physics/physics_world.h"
 #include "server/world_store.h"
 #include "voxel/world.h"
 #include "worldgen/generator.h"
@@ -11,6 +13,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <memory>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -80,6 +83,7 @@ private:
         Vec3 velocity{};
         bool on_ground = false;
         bool has_input = false;
+        PhysicsCharacter character = kInvalidPhysicsCharacter;
         PlayerMoveInput last_input{};
         std::uint32_t last_input_sequence = 0;
     };
@@ -99,6 +103,8 @@ private:
     void handle_block_edit(Player& player, std::span<const std::uint8_t> payload);
     void handle_player_input(Player& player, std::span<const std::uint8_t> payload);
     void step_players(float dt);
+    void update_collision_streaming();
+    void refresh_collision(ChunkCoord coord);
 
     void send_welcome(Player& player);
     void send_chunk(Player& player, ChunkCoord coord, std::uint32_t request_id);
@@ -118,6 +124,9 @@ private:
     WorldStore store_;
     World world_;
     ZstdCompressor compressor_{3};
+    PhysicsWorld physics_;
+    std::unique_ptr<CollisionStreamer> collision_streamer_;
+    float collision_accumulator_ = 0.0f;
 
     _ENetHost* host_ = nullptr;
     bool running_ = false;

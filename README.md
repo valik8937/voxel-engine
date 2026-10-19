@@ -14,8 +14,8 @@ authoritative server connected over ENet loopback, not a separate code path.
 Working:
 
 - Clang C++23, CMake presets, Ninja.
-- RLE chunks sized `32 x 256 x 32`, column offsets, random access, edits,
-  serialization and validation.
+- True 3D RLE chunks sized `32 x 32 x 32`, with `ChunkCoord { x, y, z }`.
+- AO-aware greedy meshing with reusable thread-local scratch buffers.
 - Deterministic FastNoiseLite terrain: continents, hills, mountains, biomes,
   water and caves.
 - 4x upsampled height/cave grids, per-column height bounds and noise caching.
@@ -25,23 +25,22 @@ Working:
 - Authoritative server, embedded single-player server and a dedicated server
   executable.
 - SDL_GPU/Vulkan renderer with chunk meshing, per-vertex ambient occlusion,
-  color ramps, sky gradient, fog and frustum-independent chunk draws.
-- First-person player with gravity, jumping, collision and client-side
-  prediction/reconciliation.
+  color ramps, sky gradient, fog and a HUD crosshair.
+- First-person player on Jolt `CharacterVirtual`, with chunk collision
+  streaming and client-side prediction/reconciliation.
+- Safe spawn search, collision-readiness gating and a fall-out respawn guard.
 - Block breaking/placing with server-side reach validation.
-- Remote player boxes from server snapshots and a HUD crosshair.
-- Safe spawn search over flat, open terrain.
-- Jolt physics wrapper (static triangle meshes, dynamic boxes) and unit test.
-- miniaudio client audio and a click sound.
+- Remote player boxes from server snapshots.
+- Jolt dynamic boxes and miniaudio client audio.
 - Headless integration tests and a chunk generation benchmark.
 
 Next:
 
-- greedy meshing and chunk LOD;
-- Jolt collision streaming for chunks around players;
+- chunk LOD and a dedicated water/transparency pass;
+- per-object model matrices for moving ships and constructs;
 - trees and surface features;
 - region-file persistence and client chunk cache;
-- shadows, transparent water pass and better UI.
+- shadows and better UI.
 
 ## Build
 
@@ -111,13 +110,14 @@ Zstandard. The rendered client holds 60 FPS at 1600x900 with radius 12
 ```text
 src/core       logging, math, job system, binary protocol helpers, zstd
 src/game       shared player movement/collision
-src/voxel      block registry, RLE chunks, world storage, raycast
+src/voxel      block registry, RLE chunks, greedy mesher, world, raycast
 src/worldgen   FastNoiseLite sampler, terrain/biome/cave generator
 src/net        protocol, ENet client/server
 src/server     authoritative server, persistence
-src/physics    Jolt physics wrapper
+src/physics    Jolt physics and CharacterVirtual wrapper
+src/game       shared input helpers and collision streaming
 src/audio      miniaudio engine
-src/render     SDL_GPU renderer and chunk mesher
+src/render     SDL_GPU renderer
 src/apps       server/client executables
 tests          unit + loopback integration tests
 benchmarks     chunk generation / memory benchmarks

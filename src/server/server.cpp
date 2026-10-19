@@ -12,6 +12,7 @@
 #include <limits>
 #include <span>
 #include <utility>
+#include <vector>
 
 namespace vox::net {
 namespace {
@@ -73,6 +74,12 @@ bool GameServer::start() {
     }
     port_ = host_->address.port;
 
+    if (!physics_.initialize()) {
+        VOX_LOG_ERROR("Jolt initialization failed");
+        return false;
+    }
+    collision_streamer_ = std::make_unique<CollisionStreamer>(world_, physics_);
+
     if (config_.load_world) {
         (void)store_.load(world_);
     }
@@ -93,6 +100,11 @@ bool GameServer::start() {
         }
     }
     refine_spawn();
+    collision_streamer_->update(
+        chunk_coord_at(static_cast<std::int64_t>(spawn_x_),
+                       static_cast<std::int64_t>(spawn_y_),
+                       static_cast<std::int64_t>(spawn_z_)),
+        1, 1, 1000);
 
     running_ = true;
     VOX_LOG_INFO("Server listening on port {} (seed {}, spec {:08x}, spawn {:.1f},{:.1f},{:.1f})",
@@ -113,6 +125,8 @@ void GameServer::stop() {
     }
     players_.clear();
     pending_chunks_.clear();
+    collision_streamer_.reset();
+    physics_.shutdown();
     running_ = false;
     VOX_LOG_INFO("Server stopped");
 }
@@ -143,6 +157,14 @@ void GameServer::tick(float dt) {
     }
 
     process_pending_chunks();
+
+    collision_accumulator_ += dt;
+    if (collision_accumulator_ >= 0.5f) {
+        collision_accumulator_ = 0.0f;
+        update_collision_streaming();
+    }
+
+    physics_.step(dt);
     step_players(dt);
 
     snapshot_accumulator_ += dt;
@@ -176,6 +198,9 @@ void GameServer::handle_event_disconnect(_ENetPeer* peer) {
     const auto it = players_.find(peer);
     if (it != players_.end()) {
         VOX_LOG_INFO("Player {} disconnected", it->second.name.empty() ? "unknown" : it->second.name);
+        if (it->second.character != kInvalidPhysicsCharacter) {
+            physics_.remove_character(it->second.character);
+        }
         players_.erase(it);
     }
 }
@@ -247,7 +272,15 @@ void GameServer::handle_hello(Player& player, std::span<const std::uint8_t> payl
     player.x = spawn_x_;
     player.y = spawn_y_;
     player.z = spawn_z_;
-    VOX_LOG_INFO("Player {} authenticated as '{}'", player.id, player.name);
+    player.velocity = {};
+
+    const ChunkCoord spawn_chunk = chunk_coord_at(
+        static_cast<std::int64_t>(spawn_x_), static_cast<std::int64_t>(spawn_y_),
+        static_cast<std::int64_t>(spawn_z_));
+    collision_streamer_->update(spawn_chunk, 1, 1, 1000);
+    player.character = physics_.create_character({spawn_x_, spawn_y_, spawn_z_});
+    VOX_LOG_INFO("Player {} authenticated as '{}' (character {})", player.id,
+                 player.name, player.character);
     send_welcome(player);
 }
 
@@ -281,6 +314,13 @@ void GameServer::handle_block_edit(Player& player, std::span<const std::uint8_t>
         return;
     }
     chunk->set_world(edit.x, edit.y, edit.z, edit.block);
+    refresh_collision(chunk->coord());
+    if (collision_streamer_) {
+        const ChunkCoord player_chunk = chunk_coord_at(
+            static_cast<std::int64_t>(player.x), static_cast<std::int64_t>(player.y),
+            static_cast<std::int64_t>(player.z));
+        (void)collision_streamer_->update(player_chunk, 2, 1, 1000);
+    }
     ++stats_.edits_applied;
 
     BlockUpdate update;
@@ -313,29 +353,85 @@ void GameServer::handle_player_input(Player& player, std::span<const std::uint8_
 }
 
 void GameServer::step_players(float dt) {
+    constexpr Vec3 kGravity{0.0f, -24.0f, 0.0f};
+
     for (auto& [peer, player] : players_) {
         (void)peer;
-        if (!player.authenticated || !player.has_input) {
+        if (!player.authenticated || player.character == kInvalidPhysicsCharacter) {
             continue;
         }
+        if (collision_streamer_) {
+            const ChunkCoord chunk = chunk_coord_at(
+                static_cast<std::int64_t>(player.x),
+                static_cast<std::int64_t>(player.y),
+                static_cast<std::int64_t>(player.z));
+            if (!collision_streamer_->has_chunk(chunk)) {
+                continue;
+            }
+        }
 
-        PlayerMoveState state;
-        state.position = Vec3{player.x, player.y, player.z};
-        state.velocity = player.velocity;
-        state.on_ground = player.on_ground;
+        const Vec3 wish = player_wish_velocity(player.last_input);
+        physics_.step_character(player.character, wish, player.last_input.jump,
+                                kGravity, dt);
 
-        step_player(world_, state, player.last_input, dt);
+        Vec3 position = physics_.character_position(player.character);
+        if (position.y < -16.0f) {
+            physics_.set_character_position(player.character,
+                                            {spawn_x_, spawn_y_, spawn_z_});
+            position = {spawn_x_, spawn_y_, spawn_z_};
+        }
+        player.x = position.x;
+        player.y = position.y;
+        player.z = position.z;
+        player.velocity = physics_.character_velocity(player.character);
+        player.on_ground = physics_.character_on_ground(player.character);
 
-        player.x = state.position.x;
-        player.y = state.position.y;
-        player.z = state.position.z;
-        player.velocity = state.velocity;
-        player.on_ground = state.on_ground;
-
-        // Movement axes are one-shot; gravity still applies next tick.
+        // Movement axes and jump are one-shot; gravity still applies next tick.
         player.last_input.move_forward = 0.0f;
         player.last_input.move_right = 0.0f;
         player.last_input.jump = false;
+    }
+}
+
+void GameServer::update_collision_streaming() {
+    if (!collision_streamer_) {
+        return;
+    }
+
+    std::vector<ChunkCoord> centers;
+    centers.reserve(players_.size());
+    for (const auto& [peer, player] : players_) {
+        (void)peer;
+        if (!player.authenticated) {
+            continue;
+        }
+        centers.push_back(chunk_coord_at(
+            static_cast<std::int64_t>(player.x),
+            static_cast<std::int64_t>(player.y),
+            static_cast<std::int64_t>(player.z)));
+    }
+
+    if (centers.empty()) {
+        collision_streamer_->clear();
+        return;
+    }
+    (void)collision_streamer_->update(centers, 2, 1, 8);
+}
+
+void GameServer::refresh_collision(ChunkCoord coord) {
+    if (!collision_streamer_) {
+        return;
+    }
+    collision_streamer_->invalidate(coord);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const ChunkCoord neighbour{coord.x + dx, coord.y + dy, coord.z + dz};
+                if (world_.get(neighbour)) {
+                    collision_streamer_->invalidate(neighbour);
+                }
+            }
+        }
     }
 }
 

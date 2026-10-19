@@ -8,7 +8,9 @@
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
+#include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -98,6 +100,7 @@ struct PhysicsWorld::Impl {
     }
 
     ~Impl() {
+        characters.clear();
         JPH::BodyInterface& bodies = physics.GetBodyInterface();
         for (const auto& [coord, body] : static_chunks) {
             (void)coord;
@@ -120,6 +123,7 @@ struct PhysicsWorld::Impl {
     JPH::PhysicsSystem physics;
     std::unordered_map<ChunkCoord, JPH::BodyID, ChunkCoordHash> static_chunks;
     std::vector<JPH::BodyID> dynamic_bodies;
+    std::vector<JPH::Ref<JPH::CharacterVirtual>> characters;
     bool initialized = false;
 };
 
@@ -196,6 +200,31 @@ void PhysicsWorld::add_static_triangles(ChunkCoord coord,
     }
 }
 
+void PhysicsWorld::add_static_chunk(ChunkCoord coord, const ChunkMesh& mesh) {
+    if (!impl_) {
+        return;
+    }
+    if (mesh.empty() || mesh.vertices.empty() || mesh.indices.empty()) {
+        remove_static_chunk(coord);
+        return;
+    }
+
+    std::vector<float> positions;
+    positions.reserve(mesh.vertices.size() * 3);
+    for (const MeshVertex& vertex : mesh.vertices) {
+        positions.push_back(vertex.x);
+        positions.push_back(vertex.y);
+        positions.push_back(vertex.z);
+    }
+    add_static_triangles(coord, positions, mesh.indices);
+}
+
+void PhysicsWorld::optimize_broadphase() {
+    if (impl_) {
+        impl_->physics.OptimizeBroadPhase();
+    }
+}
+
 void PhysicsWorld::remove_static_chunk(ChunkCoord coord) {
     if (!impl_) {
         return;
@@ -268,6 +297,125 @@ Vec3 PhysicsWorld::body_position(PhysicsBody body_handle) const {
     return Vec3(static_cast<float>(position.GetX()),
                 static_cast<float>(position.GetY()),
                 static_cast<float>(position.GetZ()));
+}
+
+PhysicsCharacter PhysicsWorld::create_character(Vec3 feet) {
+    if (!impl_) {
+        return kInvalidPhysicsCharacter;
+    }
+
+    JPH::CharacterVirtualSettings settings;
+    settings.mShape = new JPH::CapsuleShape(0.6f, 0.3f);
+    settings.mShapeOffset = JPH::Vec3(0.0f, 0.9f, 0.0f);
+    settings.mMaxSlopeAngle = JPH::DegreesToRadians(50.0f);
+    settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.01f);
+
+    auto character = JPH::Ref<JPH::CharacterVirtual>(new JPH::CharacterVirtual(
+        &settings, JPH::RVec3(feet.x, feet.y, feet.z), JPH::Quat::sIdentity(),
+        &impl_->physics));
+    impl_->characters.push_back(std::move(character));
+    return static_cast<PhysicsCharacter>(impl_->characters.size());
+}
+
+void PhysicsWorld::remove_character(PhysicsCharacter character_handle) {
+    if (!impl_ || character_handle == kInvalidPhysicsCharacter ||
+        character_handle > impl_->characters.size()) {
+        return;
+    }
+    impl_->characters[character_handle - 1] = nullptr;
+}
+
+void PhysicsWorld::step_character(PhysicsCharacter character_handle,
+                                  Vec3 horizontal_velocity, bool jump,
+                                  Vec3 gravity, float dt) {
+    if (!impl_ || character_handle == kInvalidPhysicsCharacter ||
+        character_handle > impl_->characters.size()) {
+        return;
+    }
+    auto& character = impl_->characters[character_handle - 1];
+    if (character == nullptr) {
+        return;
+    }
+
+    JPH::Vec3 velocity = character->GetLinearVelocity();
+    if (jump && character->IsSupported()) {
+        velocity.SetY(8.2f);
+    } else {
+        velocity.SetY(velocity.GetY() + gravity.y * std::clamp(dt, 0.0f, 0.1f));
+    }
+    velocity.SetX(horizontal_velocity.x);
+    velocity.SetZ(horizontal_velocity.z);
+    character->SetLinearVelocity(velocity);
+
+    const auto broadphase_filter =
+        impl_->physics.GetDefaultBroadPhaseLayerFilter(Layers::MOVING);
+    const auto layer_filter = impl_->physics.GetDefaultLayerFilter(Layers::MOVING);
+
+    character->ExtendedUpdate(std::clamp(dt, 0.0f, 0.1f),
+                              JPH::Vec3(gravity.x, gravity.y, gravity.z),
+                              JPH::CharacterVirtual::ExtendedUpdateSettings{},
+                              broadphase_filter, layer_filter, JPH::BodyFilter{},
+                              JPH::ShapeFilter{}, impl_->temp_allocator);
+}
+
+void PhysicsWorld::set_character_position(PhysicsCharacter character_handle, Vec3 feet) {
+    if (!impl_ || character_handle == kInvalidPhysicsCharacter ||
+        character_handle > impl_->characters.size()) {
+        return;
+    }
+    auto& character = impl_->characters[character_handle - 1];
+    if (character != nullptr) {
+        character->SetPosition(JPH::RVec3(feet.x, feet.y, feet.z));
+        character->SetLinearVelocity(JPH::Vec3::sZero());
+    }
+}
+
+void PhysicsWorld::set_character_velocity(PhysicsCharacter character_handle, Vec3 velocity) {
+    if (!impl_ || character_handle == kInvalidPhysicsCharacter ||
+        character_handle > impl_->characters.size()) {
+        return;
+    }
+    auto& character = impl_->characters[character_handle - 1];
+    if (character != nullptr) {
+        character->SetLinearVelocity(JPH::Vec3(velocity.x, velocity.y, velocity.z));
+    }
+}
+
+Vec3 PhysicsWorld::character_position(PhysicsCharacter character_handle) const {
+    if (!impl_ || character_handle == kInvalidPhysicsCharacter ||
+        character_handle > impl_->characters.size()) {
+        return {};
+    }
+    const auto& character = impl_->characters[character_handle - 1];
+    if (character == nullptr) {
+        return {};
+    }
+    const JPH::RVec3 position = character->GetPosition();
+    return Vec3(static_cast<float>(position.GetX()),
+                static_cast<float>(position.GetY()),
+                static_cast<float>(position.GetZ()));
+}
+
+Vec3 PhysicsWorld::character_velocity(PhysicsCharacter character_handle) const {
+    if (!impl_ || character_handle == kInvalidPhysicsCharacter ||
+        character_handle > impl_->characters.size()) {
+        return {};
+    }
+    const auto& character = impl_->characters[character_handle - 1];
+    if (character == nullptr) {
+        return {};
+    }
+    const JPH::Vec3 velocity = character->GetLinearVelocity();
+    return Vec3(velocity.GetX(), velocity.GetY(), velocity.GetZ());
+}
+
+bool PhysicsWorld::character_on_ground(PhysicsCharacter character_handle) const {
+    if (!impl_ || character_handle == kInvalidPhysicsCharacter ||
+        character_handle > impl_->characters.size()) {
+        return false;
+    }
+    const auto& character = impl_->characters[character_handle - 1];
+    return character != nullptr && character->IsSupported();
 }
 
 void PhysicsWorld::step(float dt) {

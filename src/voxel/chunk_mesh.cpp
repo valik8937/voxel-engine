@@ -1,7 +1,6 @@
-#include "render/chunk_mesh.h"
+#include "voxel/chunk_mesh.h"
 
 #include "voxel/block.h"
-#include "voxel/world.h"
 
 #include <algorithm>
 #include <array>
@@ -128,7 +127,7 @@ Color shaded_color(BlockId block, int ao, float light) {
 
 } // namespace
 
-ChunkMesh mesh_chunk(const World& world, ChunkCoord coord) {
+ChunkMesh mesh_chunk(const World& world, ChunkCoord coord, bool include_liquids) {
     ChunkMesh mesh;
     mesh.bounds.min = Vec3{static_cast<float>(coord.x * kChunkSizeX),
                            static_cast<float>(coord.y * kChunkSizeY),
@@ -209,7 +208,8 @@ ChunkMesh mesh_chunk(const World& world, ChunkCoord coord) {
                     const int py = y + 1;
                     const int pz = z + 1;
                     const BlockId block = volume.at(px, py, pz);
-                    if (block == blocks::Air) {
+                    if (block == blocks::Air ||
+                        (!include_liquids && block_is_liquid(block))) {
                         continue;
                     }
 

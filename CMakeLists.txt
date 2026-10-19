@@ -74,7 +74,6 @@ FetchContent_MakeAvailable(enet)
 # ---- Core ------------------------------------------------------------------
 file(GLOB_RECURSE VOX_CORE_SOURCES CONFIGURE_DEPENDS
     src/core/*.cpp
-    src/game/*.cpp
     src/voxel/*.cpp
     src/worldgen/*.cpp
 )
@@ -105,8 +104,12 @@ target_link_libraries(vox_server_lib PUBLIC vox_net vox_core)
 # ---- Physics ---------------------------------------------------------------
 file(GLOB_RECURSE VOX_PHYSICS_SOURCES CONFIGURE_DEPENDS src/physics/*.cpp)
 
-add_library(vox_physics STATIC ${VOX_PHYSICS_SOURCES})
+add_library(vox_physics STATIC
+    ${VOX_PHYSICS_SOURCES}
+    src/game/collision_streamer.cpp
+)
 target_link_libraries(vox_physics PUBLIC vox_core Jolt)
+target_link_libraries(vox_server_lib PUBLIC vox_physics)
 
 # ---- Audio -----------------------------------------------------------------
 file(GLOB_RECURSE VOX_AUDIO_SOURCES CONFIGURE_DEPENDS src/audio/*.cpp)

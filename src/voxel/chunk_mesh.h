@@ -2,6 +2,7 @@
 
 #include "core/math.h"
 #include "voxel/chunk.h"
+#include "voxel/world.h"
 
 #include <cstdint>
 #include <vector>
@@ -31,8 +32,7 @@ struct ChunkMesh {
     }
 };
 
-class World;
-
-[[nodiscard]] ChunkMesh mesh_chunk(const World& world, ChunkCoord coord);
+[[nodiscard]] ChunkMesh mesh_chunk(const World& world, ChunkCoord coord,
+                                   bool include_liquids = true);
 
 } // namespace vox

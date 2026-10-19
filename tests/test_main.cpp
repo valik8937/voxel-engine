@@ -2,7 +2,8 @@
 #include "core/hash.h"
 #include "core/job_system.h"
 #include "core/zstd.h"
-#include "game/player_controller.h"
+#include "game/collision_streamer.h"
+#include "game/player_input.h"
 #include "net/client.h"
 #include "net/protocol.h"
 #include "net/server.h"
@@ -451,37 +452,202 @@ void test_raycast() {
     CHECK(!miss.hit);
 }
 
-void test_player_controller() {
+void test_networked_character_jump() {
+    using namespace vox;
+    using namespace vox::net;
+
+    ServerConfig server_config;
+    server_config.port = 0;
+    server_config.seed = 1337;
+    server_config.max_players = 2;
+    server_config.persist = false;
+    server_config.load_world = false;
+    server_config.max_chunk_requests_per_tick = 16;
+
+    GameServer server(server_config);
+    CHECK(server.start());
+    if (!server.running()) {
+        return;
+    }
+
+    GameClient client;
+    ClientConfig client_config;
+    client_config.host = "127.0.0.1";
+    client_config.port = server.port();
+    CHECK(client.connect(client_config));
+
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!client.welcome() && std::chrono::steady_clock::now() < deadline) {
+        server.tick(1.0f / 30.0f);
+        client.poll(1);
+        std::this_thread::sleep_for(1ms);
+    }
+    CHECK(client.welcome().has_value());
+    if (!client.welcome()) {
+        client.disconnect();
+        server.stop();
+        return;
+    }
+
+    const auto welcome = *client.welcome();
+    const ChunkCoord spawn_chunk = chunk_coord_at(
+        static_cast<std::int64_t>(welcome.spawn_x),
+        static_cast<std::int64_t>(welcome.spawn_y),
+        static_cast<std::int64_t>(welcome.spawn_z));
+    CHECK(client.request_chunk(spawn_chunk));
+
+    PhysicsWorld physics;
+    CHECK(physics.initialize());
+    CollisionStreamer collision(client.world(), physics);
+    const PhysicsCharacter character =
+        physics.create_character({welcome.spawn_x, welcome.spawn_y, welcome.spawn_z});
+    CHECK(character != kInvalidPhysicsCharacter);
+
+    bool collision_ready = false;
+    const auto collision_deadline = std::chrono::steady_clock::now() + 5s;
+    while (!collision_ready && std::chrono::steady_clock::now() < collision_deadline) {
+        server.tick(1.0f / 30.0f);
+        client.poll(1);
+        (void)collision.update(spawn_chunk, 1, 1, 1000);
+        collision_ready = collision.has_chunk(spawn_chunk);
+        std::this_thread::sleep_for(1ms);
+    }
+    CHECK(collision_ready);
+
+    constexpr Vec3 gravity{0.0f, -24.0f, 0.0f};
+    std::uint32_t sequence = 1;
+    for (int i = 0; i < 150; ++i) {
+        PlayerMoveInput local_input;
+        local_input.jump = (i == 0);
+        const Vec3 wish = player_wish_velocity(local_input);
+
+        net::PlayerInput network_input;
+        network_input.sequence = sequence++;
+        network_input.jump = local_input.jump;
+        CHECK(client.send_player_input(network_input));
+
+        client.poll(0);
+        server.tick(1.0f / 30.0f);
+        client.poll(1);
+
+        physics.step(1.0f / 30.0f);
+        physics.step_character(character, wish, local_input.jump, gravity,
+                               1.0f / 30.0f);
+
+        if (const net::PlayerState* self = client.local_player()) {
+            const Vec3 server_position{self->x, self->y, self->z};
+            const Vec3 local_position = physics.character_position(character);
+            if (length(local_position - server_position) > 3.0f) {
+                physics.set_character_position(character, server_position);
+            }
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+
+    const Vec3 local_position = physics.character_position(character);
+    CHECK(local_position.y > welcome.spawn_y - 2.0f);
+    if (const net::PlayerState* self = client.local_player()) {
+        CHECK(self->y > welcome.spawn_y - 2.0f);
+    }
+
+    physics.remove_character(character);
+    collision.clear();
+    physics.shutdown();
+    client.disconnect();
+    server.stop();
+}
+
+void test_jolt_character_on_generated_chunks() {
     using namespace vox;
 
-    std::vector<Run> runs;
-    runs.reserve(static_cast<std::size_t>(kChunkColumns) * 2);
-    for (int i = 0; i < kChunkColumns; ++i) {
-        runs.push_back(Run{blocks::Stone, kChunkSizeY});
-    }
+    WorldSpec spec = WorldSpec::make_default(1337);
+    WorldGenerator generator(spec);
     World world;
-    world.insert(std::make_shared<Chunk>(
-        Chunk::from_runs(ChunkCoord{0, 0, 0}, 0, std::move(runs))));
 
-    PlayerMoveState state;
-    state.position = Vec3{16.0f, 40.0f, 16.0f};
-    PlayerMoveInput idle;
-    for (int i = 0; i < 180; ++i) {
-        step_player(world, state, idle, 1.0f / 60.0f);
+    const float surface = generator.height_at(16, 16);
+    const int surface_block = static_cast<int>(std::floor(surface));
+    const ChunkCoord center = chunk_coord_at(16, surface_block + 1, 16);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const ChunkCoord coord{center.x + dx, center.y + dy, center.z + dz};
+                world.insert(std::make_shared<Chunk>(generator.generate(coord)));
+            }
+        }
     }
-    CHECK(state.on_ground);
-    CHECK(state.position.y > 31.5f);
-    CHECK(state.position.y < 33.0f);
 
-    const float start_z = state.position.z;
-    PlayerMoveInput forward;
-    forward.move_forward = 1.0f;
-    forward.yaw = 0.0f;
-    for (int i = 0; i < 60; ++i) {
-        step_player(world, state, forward, 1.0f / 60.0f);
+    PhysicsWorld physics;
+    CHECK(physics.initialize());
+    CollisionStreamer collision(world, physics);
+    CHECK(collision.update(center, 1, 1, 1000));
+    CHECK(collision.has_chunk(center));
+
+    const float start_y = static_cast<float>(surface_block + 3);
+    const PhysicsCharacter character = physics.create_character({16.5f, start_y, 16.5f});
+    CHECK(character != kInvalidPhysicsCharacter);
+
+    for (int i = 0; i < 120; ++i) {
+        physics.step(1.0f / 60.0f);
+        physics.step_character(character, {}, false, {0.0f, -24.0f, 0.0f},
+                               1.0f / 60.0f);
     }
-    CHECK(state.position.z < start_z - 2.0f);
-    CHECK(std::abs(state.position.x - 16.0f) < 0.1f);
+    const float settled_y = physics.character_position(character).y;
+    CHECK(settled_y > static_cast<float>(surface_block) - 0.5f);
+    CHECK(settled_y < start_y);
+
+    // Jump and verify the character does not tunnel through the generated chunk.
+    physics.step_character(character, {}, true, {0.0f, -24.0f, 0.0f}, 1.0f / 60.0f);
+    float peak_y = settled_y;
+    for (int i = 0; i < 120; ++i) {
+        physics.step(1.0f / 60.0f);
+        physics.step_character(character, {}, false, {0.0f, -24.0f, 0.0f},
+                               1.0f / 60.0f);
+        peak_y = std::max(peak_y, physics.character_position(character).y);
+    }
+    CHECK(peak_y > settled_y + 0.2f);
+    CHECK(physics.character_position(character).y >
+          static_cast<float>(surface_block) - 0.5f);
+
+    physics.remove_character(character);
+    collision.clear();
+    physics.shutdown();
+}
+
+void test_jolt_chunk_boundaries_and_jumping() {
+    using namespace vox;
+
+    World world;
+    for (int z = -2; z <= 2; ++z) {
+        for (int x = -2; x <= 2; ++x) {
+            world.insert(std::make_shared<Chunk>(Chunk::make_flat(
+                ChunkCoord{x, 0, z}, blocks::Stone)));
+        }
+    }
+
+    PhysicsWorld physics;
+    CHECK(physics.initialize());
+    CollisionStreamer collision(world, physics);
+    (void)collision.update(ChunkCoord{0, 0, 0}, 2, 1, 1000);
+    CHECK(collision.has_chunk(ChunkCoord{0, 0, 0}));
+
+    const PhysicsCharacter character =
+        physics.create_character({16.5f, 34.0f, 16.5f});
+    CHECK(character != kInvalidPhysicsCharacter);
+
+    for (int i = 0; i < 300; ++i) {
+        physics.step(1.0f / 60.0f);
+        physics.step_character(character, {0.0f, 0.0f, -4.8f}, (i % 60) == 0,
+                               {0.0f, -24.0f, 0.0f}, 1.0f / 60.0f);
+    }
+
+    const Vec3 position = physics.character_position(character);
+    CHECK(position.y > 31.5f);
+    CHECK(position.y < 34.5f);
+    CHECK(position.z < 10.0f);
+
+    physics.remove_character(character);
+    collision.clear();
+    physics.shutdown();
 }
 
 void test_physics() {
@@ -509,6 +675,28 @@ void test_physics() {
     CHECK(position.y > -0.1f);
 
     physics.remove_body(box);
+
+    const vox::PhysicsCharacter character =
+        physics.create_character({0.0f, 4.0f, 0.0f});
+    CHECK(character != vox::kInvalidPhysicsCharacter);
+    for (int i = 0; i < 180; ++i) {
+        physics.step(1.0f / 60.0f);
+        physics.step_character(character, {}, false, {0.0f, -24.0f, 0.0f},
+                               1.0f / 60.0f);
+    }
+    const vox::Vec3 character_position = physics.character_position(character);
+    CHECK(character_position.y < 4.0f);
+    CHECK(character_position.y > -0.5f);
+    CHECK(physics.character_on_ground(character));
+
+    for (int i = 0; i < 60; ++i) {
+        physics.step(1.0f / 60.0f);
+        physics.step_character(character, {2.0f, 0.0f, 0.0f}, false,
+                               {0.0f, -24.0f, 0.0f}, 1.0f / 60.0f);
+    }
+    CHECK(physics.character_position(character).x > 0.5f);
+
+    physics.remove_character(character);
     physics.shutdown();
     CHECK(!physics.running());
 }
@@ -536,8 +724,10 @@ int main() {
     test_generator();
     test_protocol();
     test_integration();
+    test_networked_character_jump();
     test_raycast();
-    test_player_controller();
+    test_jolt_character_on_generated_chunks();
+    test_jolt_chunk_boundaries_and_jumping();
     test_physics();
     test_job_system();
 

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "render/camera.h"
-#include "render/chunk_mesh.h"
+#include "voxel/chunk_mesh.h"
 #include "voxel/world.h"
 
 #include <SDL3/SDL.h>

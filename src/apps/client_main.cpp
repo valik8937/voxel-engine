@@ -1,7 +1,9 @@
 #include "audio/audio_engine.h"
 #include "core/log.h"
-#include "game/player_controller.h"
+#include "game/collision_streamer.h"
+#include "game/player_input.h"
 #include "net/client.h"
+#include "physics/physics_world.h"
 #include "net/server.h"
 #include "render/camera.h"
 #include "render/renderer.h"
@@ -18,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -260,17 +263,18 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
         return 1;
     }
 
-    SDL_RaiseWindow(renderer.window());
-
     vox::Camera camera;
-    vox::PlayerMoveState local_player;
+    vox::PhysicsWorld physics;
+    std::unique_ptr<vox::CollisionStreamer> collision_streamer;
+    vox::PhysicsCharacter local_character = vox::kInvalidPhysicsCharacter;
     vox::ChunkCoord local_spawn_chunk{};
-    bool has_local_player = false;
+    bool local_collision_ready = false;
     bool chunks_requested = false;
     bool running = true;
     bool mouse_captured = false;
     std::uint32_t input_sequence = 0;
     float input_accumulator = 0.0f;
+    float collision_accumulator = 0.0f;
     double last_time = now_seconds();
     double last_stats = last_time;
     float accumulator = 0.0f;
@@ -279,6 +283,34 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
     std::size_t expected_chunks = 0;
     std::vector<vox::PlayerRenderInfo> remote_players;
     remote_players.reserve(16);
+
+    const auto refresh_local_collision = [&](int x, int y, int z) {
+        if (!collision_streamer) {
+            return;
+        }
+        const vox::ChunkCoord center =
+            vox::chunk_coord_at(x, y, z);
+        collision_streamer->invalidate(center);
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const vox::ChunkCoord neighbour{center.x + dx, center.y + dy,
+                                                    center.z + dz};
+                    if (client.world().get(neighbour)) {
+                        collision_streamer->invalidate(neighbour);
+                    }
+                }
+            }
+        }
+        if (local_character != vox::kInvalidPhysicsCharacter) {
+            const vox::Vec3 position = physics.character_position(local_character);
+            (void)collision_streamer->update(
+                vox::chunk_coord_at(static_cast<std::int64_t>(position.x),
+                                    static_cast<std::int64_t>(position.y),
+                                    static_cast<std::int64_t>(position.z)),
+                2, 1, 1000);
+        }
+    };
 
     while (running) {
         const double now = now_seconds();
@@ -315,16 +347,20 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
 
         if (client.welcome() && !chunks_requested) {
             const auto welcome = *client.welcome();
-            local_player.position = vox::Vec3{welcome.spawn_x, welcome.spawn_y,
-                                              welcome.spawn_z};
-            local_player.velocity = {};
-            local_player.on_ground = false;
-            has_local_player = true;
             local_spawn_chunk = vox::chunk_coord_at(
                 static_cast<std::int64_t>(welcome.spawn_x),
                 static_cast<std::int64_t>(welcome.spawn_y),
                 static_cast<std::int64_t>(welcome.spawn_z));
-            camera.position = local_player.position +
+
+            if (physics.initialize()) {
+                collision_streamer = std::make_unique<vox::CollisionStreamer>(
+                    client.world(), physics);
+                local_character = physics.create_character(
+                    {welcome.spawn_x, welcome.spawn_y, welcome.spawn_z});
+            }
+
+            camera.position = vox::Vec3{welcome.spawn_x, welcome.spawn_y,
+                                        welcome.spawn_z} +
                               vox::Vec3{0.0f, vox::kPlayerEyeHeight, 0.0f};
             camera.pitch = -0.15f;
             const int min_chunk_y =
@@ -379,7 +415,7 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                 if (!mouse_captured) {
                     mouse_captured = true;
                     SDL_SetWindowRelativeMouseMode(renderer.window(), true);
-                } else if (has_local_player) {
+                } else if (local_character != vox::kInvalidPhysicsCharacter) {
                     const auto hit = vox::raycast_voxels(
                         client.world(), camera.position, camera.forward(), 6.0f);
                     if (hit.hit) {
@@ -387,6 +423,7 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                             (void)client.send_block_edit(hit.x, static_cast<std::uint16_t>(hit.y),
                                                          hit.z, vox::blocks::Air);
                             (void)client.world().set_block(hit.x, hit.y, hit.z, vox::blocks::Air);
+                            refresh_local_collision(hit.x, hit.y, hit.z);
                             (void)audio.play_sound("assets/audio/click.wav");
                         } else if (event.button.button == SDL_BUTTON_RIGHT) {
                             const int px = hit.x + hit.normal_x;
@@ -399,11 +436,14 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
                                           static_cast<float>(py + 1),
                                           static_cast<float>(pz + 1)},
                             };
+                            const vox::Vec3 feet =
+                                physics.character_position(local_character);
                             if (py >= 0 && py < vox::kWorldHeight &&
-                                !target.overlaps(vox::player_aabb(local_player.position))) {
+                                !target.overlaps(vox::player_aabb(feet))) {
                                 (void)client.send_block_edit(px, static_cast<std::uint16_t>(py),
                                                              pz, vox::blocks::Stone);
                                 (void)client.world().set_block(px, py, pz, vox::blocks::Stone);
+                                refresh_local_collision(px, py, pz);
                                 (void)audio.play_sound("assets/audio/click.wav");
                             }
                         }
@@ -416,53 +456,106 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
             }
         }
 
-        if (has_local_player) {
+        physics.step(frame_dt);
+
+        if (local_character != vox::kInvalidPhysicsCharacter) {
             const bool* keys = SDL_GetKeyboardState(nullptr);
-            const bool spawn_ready =
-                client.world().get(local_spawn_chunk) != nullptr;
+            constexpr vox::Vec3 kGravity{0.0f, -24.0f, 0.0f};
 
-            input_accumulator += frame_dt;
-            constexpr float kInputStep = 1.0f / 30.0f;
-            while (input_accumulator >= kInputStep) {
-                input_accumulator -= kInputStep;
-                if (!spawn_ready || keys == nullptr) {
-                    continue;
-                }
-
-                vox::PlayerMoveInput input;
-                input.move_forward = (keys[SDL_SCANCODE_W] ? 1.0f : 0.0f) -
-                                     (keys[SDL_SCANCODE_S] ? 1.0f : 0.0f);
-                input.move_right = (keys[SDL_SCANCODE_D] ? 1.0f : 0.0f) -
-                                   (keys[SDL_SCANCODE_A] ? 1.0f : 0.0f);
-                input.jump = keys[SDL_SCANCODE_SPACE];
-                input.sprint = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
-                input.yaw = camera.yaw;
-                input.pitch = camera.pitch;
-
-                vox::step_player(client.world(), local_player, input, kInputStep);
-
-                vox::net::PlayerInput network_input;
-                network_input.sequence = ++input_sequence;
-                network_input.move_forward = input.move_forward;
-                network_input.move_right = input.move_right;
-                network_input.yaw = input.yaw;
-                network_input.pitch = input.pitch;
-                network_input.jump = input.jump;
-                network_input.sprint = input.sprint;
-                (void)client.send_player_input(network_input);
+            if (!local_collision_ready && collision_streamer) {
+                (void)collision_streamer->update(local_spawn_chunk, 1, 1, 1000);
+                local_collision_ready =
+                    collision_streamer->has_chunk(local_spawn_chunk);
             }
 
-            if (const vox::net::PlayerState* server_self = client.local_player()) {
-                const vox::Vec3 server_position{server_self->x, server_self->y,
-                                                server_self->z};
-                if (vox::length(local_player.position - server_position) > 3.0f) {
-                    local_player.position = server_position;
-                    local_player.velocity = {};
-                }
+            if (!local_collision_ready) {
+                camera.position = vox::Vec3{client.welcome()->spawn_x,
+                                            client.welcome()->spawn_y,
+                                            client.welcome()->spawn_z} +
+                                  vox::Vec3{0.0f, vox::kPlayerEyeHeight, 0.0f};
             }
 
-            camera.position = local_player.position +
-                              vox::Vec3{0.0f, vox::kPlayerEyeHeight, 0.0f};
+            collision_accumulator += frame_dt;
+            if (local_collision_ready && collision_accumulator >= 0.5f &&
+                collision_streamer) {
+                collision_accumulator = 0.0f;
+                const vox::Vec3 position =
+                    physics.character_position(local_character);
+                (void)collision_streamer->update(
+                    vox::chunk_coord_at(static_cast<std::int64_t>(position.x),
+                                        static_cast<std::int64_t>(position.y),
+                                        static_cast<std::int64_t>(position.z)),
+                    2, 1, 8);
+            }
+
+            if (local_collision_ready) {
+                input_accumulator += frame_dt;
+                constexpr float kInputStep = 1.0f / 30.0f;
+                while (input_accumulator >= kInputStep) {
+                    input_accumulator -= kInputStep;
+                    if (keys == nullptr) {
+                        continue;
+                    }
+
+                    vox::PlayerMoveInput input;
+                    input.move_forward = (keys[SDL_SCANCODE_W] ? 1.0f : 0.0f) -
+                                         (keys[SDL_SCANCODE_S] ? 1.0f : 0.0f);
+                    input.move_right = (keys[SDL_SCANCODE_D] ? 1.0f : 0.0f) -
+                                       (keys[SDL_SCANCODE_A] ? 1.0f : 0.0f);
+                    input.jump = keys[SDL_SCANCODE_SPACE];
+                    input.sprint = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
+                    input.yaw = camera.yaw;
+                    input.pitch = camera.pitch;
+
+                    const vox::Vec3 feet =
+                        physics.character_position(local_character);
+                    const vox::ChunkCoord feet_chunk = vox::chunk_coord_at(
+                        static_cast<std::int64_t>(feet.x),
+                        static_cast<std::int64_t>(feet.y),
+                        static_cast<std::int64_t>(feet.z));
+                    if (collision_streamer &&
+                        !collision_streamer->has_chunk(feet_chunk)) {
+                        (void)collision_streamer->update(feet_chunk, 2, 1, 4);
+                        continue;
+                    }
+
+                    physics.step_character(local_character,
+                                           vox::player_wish_velocity(input),
+                                           input.jump, kGravity, kInputStep);
+
+                    vox::net::PlayerInput network_input;
+                    network_input.sequence = ++input_sequence;
+                    network_input.move_forward = input.move_forward;
+                    network_input.move_right = input.move_right;
+                    network_input.yaw = input.yaw;
+                    network_input.pitch = input.pitch;
+                    network_input.jump = input.jump;
+                    network_input.sprint = input.sprint;
+                    (void)client.send_player_input(network_input);
+                }
+
+                if (const vox::net::PlayerState* server_self = client.local_player()) {
+                    const vox::Vec3 server_position{server_self->x, server_self->y,
+                                                    server_self->z};
+                    const vox::Vec3 local_position =
+                        physics.character_position(local_character);
+                    if (vox::length(local_position - server_position) > 3.0f) {
+                        physics.set_character_position(local_character, server_position);
+                    }
+                }
+
+                vox::Vec3 character_position =
+                    physics.character_position(local_character);
+                if (character_position.y < -16.0f && client.welcome()) {
+                    const vox::Vec3 respawn{client.welcome()->spawn_x,
+                                            client.welcome()->spawn_y,
+                                            client.welcome()->spawn_z};
+                    physics.set_character_position(local_character, respawn);
+                    character_position = respawn;
+                }
+                camera.position = character_position +
+                                  vox::Vec3{0.0f, vox::kPlayerEyeHeight, 0.0f};
+            }
         }
 
         renderer.update_world(client.world());
@@ -478,16 +571,25 @@ int run_rendered(const Options& options, vox::net::GameServer* server) {
             last_stats = now;
             const double fps = static_cast<double>(frame_count) / std::max(elapsed, 0.001);
             frame_count = 0;
+            const vox::Vec3 debug_position =
+                local_character != vox::kInvalidPhysicsCharacter
+                    ? physics.character_position(local_character)
+                    : camera.position;
             std::cout << "fps=" << static_cast<int>(fps + 0.5)
                       << " tick=" << client.server_tick()
                       << " chunks=" << client.world().chunk_count()
                       << " meshes=" << renderer.mesh_count()
                       << " received=" << client.stats().chunks_received
-                      << "\n";
+                      << " pos=" << debug_position.x << "," << debug_position.y
+                      << "," << debug_position.z << "\n";
         }
     }
 
     SDL_SetWindowRelativeMouseMode(renderer.window(), false);
+    if (collision_streamer) {
+        collision_streamer->clear();
+    }
+    physics.shutdown();
     client.disconnect();
     audio.shutdown();
     renderer.shutdown();
